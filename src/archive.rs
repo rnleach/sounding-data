@@ -12,10 +12,10 @@ use std::sync::mpsc::{channel, Receiver};
 use std::thread::{self, JoinHandle};
 use strum::AsStaticRef;
 
-use errors::BufkitDataErr;
-use inventory::Inventory;
-use models::Model;
-use site::{Site, StateProv};
+use crate::errors::BufkitDataErr;
+use crate::inventory::Inventory;
+use crate::models::Model;
+use crate::site::{Site, StateProv};
 
 /// The archive.
 #[derive(Debug)]

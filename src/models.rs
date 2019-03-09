@@ -35,7 +35,7 @@ pub enum Model {
 
 impl fmt::Display for Model {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use Model::*;
+        use crate::Model::*;
 
         match *self {
             GFS => write!(f, "{}", stringify!(GFS)),

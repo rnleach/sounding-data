@@ -6,19 +6,19 @@
 //! [sonde](https://github.com/rnleach/sonde.git), but it also supports a set of command line tools
 //! for utilizing the archive.
 //!
-//! The current implementation uses an [sqlite](https://www.sqlite.org/index.html) database to keep 
-//! track of files stored in a common directory. The files are compressed, and so should only be 
+//! The current implementation uses an [sqlite](https://www.sqlite.org/index.html) database to keep
+//! track of files stored in a common directory. The files are compressed, and so should only be
 //! accessed via the api provided by this crate.
 #![deny(missing_docs)]
 
 //
 // Public API
 //
-pub use archive::Archive;
-pub use errors::BufkitDataErr;
-pub use inventory::Inventory;
-pub use models::Model;
-pub use site::{Site, StateProv};
+pub use crate::archive::Archive;
+pub use crate::errors::BufkitDataErr;
+pub use crate::inventory::Inventory;
+pub use crate::models::Model;
+pub use crate::site::{Site, StateProv};
 
 //
 // Implementation only
