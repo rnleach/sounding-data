@@ -1,29 +1,26 @@
-use chrono::FixedOffset;
+use strum_macros::{AsStaticStr, EnumIter, EnumString};
 
 /// Description of a site with a sounding.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Site {
     /// Site id, usually a 3 or 4 letter identifier (e.g. kord katl ksea).
-    pub id: String,
+    pub short_name: String,
     /// A longer, more human readable name.
-    pub name: Option<String>,
+    pub long_name: Option<String>,
     /// Any relevant notes about the site.
     pub notes: Option<String>,
     /// The state or providence where this location is located. This allows querying sites by what
     /// state or providence they are in.
     pub state: Option<StateProv>,
-    /// For programs that download files, this allows marking some sites for automatic download
-    /// without further specification.
-    pub auto_download: bool,
-    /// Time zone information
-    pub time_zone: Option<FixedOffset>,
+    /// Does this site represent a mobile unit.
+    pub is_mobile: bool,
 }
 
 impl Site {
     /// Return true if there is any missing data. It ignores the notes field since this is only
     /// rarely used.
     pub fn incomplete(&self) -> bool {
-        self.name.is_none() || self.state.is_none() || self.time_zone.is_none()
+        self.long_name.is_none() || self.state.is_none()
     }
 }
 
@@ -105,21 +102,19 @@ mod unit {
     #[test]
     fn test_site_incomplete() {
         let complete_site = Site {
-            id: "kxly".to_owned(),
-            name: Some("tv station".to_owned()),
+            short_name: "kxly".to_owned(),
+            long_name: Some("tv station".to_owned()),
             state: Some(StateProv::VI),
             notes: Some("".to_owned()),
-            auto_download: false,
-            time_zone: Some(FixedOffset::west(7 * 3600)),
+            is_mobile: false,
         };
 
         let incomplete_site = Site {
-            id: "kxly".to_owned(),
-            name: Some("tv station".to_owned()),
+            short_name: "kxly".to_owned(),
+            long_name: Some("tv station".to_owned()),
             state: None,
             notes: None,
-            auto_download: true,
-            time_zone: None,
+            is_mobile: false,
         };
 
         assert!(!complete_site.incomplete());

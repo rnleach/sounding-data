@@ -1,9 +1,9 @@
 //! Module for errors.
 use sounding_analysis::AnalysisError;
-use sounding_bufkit::BufkitFileError;
 use std::error::Error;
 use std::fmt::Display;
 
+/// FIXME: Rename this error.
 /// Error from the archive interface.
 #[derive(Debug)]
 pub enum BufkitDataErr {
@@ -12,8 +12,6 @@ pub enum BufkitDataErr {
     //
     /// Error forwarded from sounding-analysis
     SoundingAnalysis(AnalysisError),
-    /// Error forwarded from sounding-bufkit
-    SoundingBufkit(BufkitFileError),
 
     //
     // Inherited errors from std
@@ -48,7 +46,6 @@ impl Display for BufkitDataErr {
 
         match self {
             SoundingAnalysis(err) => write!(f, "error from sounding-analysis: {}", err),
-            SoundingBufkit(err) => write!(f, "error from sounding-bufkit: {}", err),
 
             IO(err) => write!(f, "std lib io error: {}", err),
             SenderError(err) => write!(f, "error sending message across threads: {}", err),
@@ -64,12 +61,6 @@ impl Display for BufkitDataErr {
 }
 
 impl Error for BufkitDataErr {}
-
-impl From<BufkitFileError> for BufkitDataErr {
-    fn from(err: BufkitFileError) -> BufkitDataErr {
-        BufkitDataErr::SoundingBufkit(err)
-    }
-}
 
 impl From<AnalysisError> for BufkitDataErr {
     fn from(err: AnalysisError) -> BufkitDataErr {
