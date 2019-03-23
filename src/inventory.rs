@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 /// Inventory lists first & last initialization times of the models in the archive for a site &
 /// model. It also contains a list of model initialization times that are missing between the first
 /// and last.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Inventory {
     /// The site this is an inventory for.
     pub site: Site,

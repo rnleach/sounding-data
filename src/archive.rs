@@ -604,6 +604,8 @@ impl Archive {
 mod unit {
     use super::*;
 
+    use crate::Location;
+    use std::collections::{HashMap, HashSet};
     use std::fs::read_dir;
 
     use chrono::NaiveDate;
@@ -840,30 +842,53 @@ mod unit {
         assert!(!types.contains(&"Other".to_owned()));
     }
 
-    // #[test]
-    // fn test_inventory() {
-    //     let TestArchive {
-    //         tmp: _tmp,
-    //         mut arch,
-    //     } = create_test_archive().expect("Failed to create test archive.");
+    #[test]
+    fn test_inventory() {
+        let TestArchive {
+            tmp: _tmp,
+            mut arch,
+        } = create_test_archive().expect("Failed to create test archive.");
 
-    //     fill_test_archive(&mut arch).expect("Error filling test archive.");
+        fill_test_archive(&mut arch).expect("Error filling test archive.");
 
-    //     let first = NaiveDate::from_ymd(2017, 4, 1).and_hms(0, 0, 0);
-    //     let last = NaiveDate::from_ymd(2017, 4, 1).and_hms(18, 0, 0);
-    //     let missing = vec![(
-    //         NaiveDate::from_ymd(2017, 4, 1).and_hms(6, 0, 0),
-    //         NaiveDate::from_ymd(2017, 4, 1).and_hms(6, 0, 0),
-    //     )];
+        let site = Site::new("kmso");
 
-    //     let expected = Inventory {
-    //         first,
-    //         last,
-    //         missing,
-    //         auto_download: false, // this is the default value
-    //     };
-    //     assert_eq!(arch.inventory("kmso", Model::NAM).unwrap(), expected);
-    // }
+        let gfs = SoundingType::new_model("GFS", 6);
+        let nam = SoundingType::new_model("NAM", 6);
+        let mut sounding_types = HashSet::new();
+        sounding_types.insert(gfs.clone());
+        sounding_types.insert(nam.clone());
+
+        let first = NaiveDate::from_ymd(2017, 4, 1).and_hms(0, 0, 0);
+        let last = NaiveDate::from_ymd(2017, 4, 1).and_hms(18, 0, 0);
+        let mut range = HashMap::new();
+        range.insert(gfs.clone(), (first, last));
+        range.insert(nam.clone(), (first, last));
+
+        let mut missing = HashMap::new();
+        missing.insert(
+            nam.clone(),
+            vec![(
+                NaiveDate::from_ymd(2017, 4, 1).and_hms(6, 0, 0),
+                NaiveDate::from_ymd(2017, 4, 1).and_hms(6, 0, 0),
+            )],
+        );
+
+        let gfs_list = vec![Location::new(46.92, -114.08, 972.0, None)];
+        let nam_list = vec![Location::new(46.87, -114.16, 1335.0, None)];
+        let mut locations = HashMap::new();
+        locations.insert(gfs.clone(), gfs_list);
+        locations.insert(nam.clone(), nam_list);
+
+        let expected = Inventory {
+            site: site.clone(),
+            sounding_types,
+            range,
+            missing,
+            locations,
+        };
+        assert_eq!(arch.inventory(&site, &nam).unwrap(), expected);
+    }
 
     #[test]
     fn test_count() {
@@ -997,26 +1022,26 @@ mod unit {
             .expect("Error checking for existence"));
     }
 
-    // #[test]
-    // fn test_remove_file() {
-    //     let TestArchive {
-    //         tmp: _tmp,
-    //         mut arch,
-    //     } = create_test_archive().expect("Failed to create test archive.");
+    #[test]
+    fn test_remove_file() {
+        let TestArchive {
+            tmp: _tmp,
+            mut arch,
+        } = create_test_archive().expect("Failed to create test archive.");
 
-    //     fill_test_archive(&mut arch).expect("Error filling test archive.");
+        fill_test_archive(&mut arch).expect("Error filling test archive.");
 
-    //     let init_time = NaiveDate::from_ymd(2017, 4, 1).and_hms(0, 0, 0);
-    //     let model = Model::GFS;
-    //     let site = "kmso";
+        let init_time = NaiveDate::from_ymd(2017, 4, 1).and_hms(0, 0, 0);
+        let kmso = Site::new("kmso");
+        let snd_type = SoundingType::new_model("GFS", None);
 
-    //     assert!(arch
-    //         .file_exists(site, model, &init_time)
-    //         .expect("Error checking db"));
-    //     arch.remove(site, model, &init_time)
-    //         .expect("Error while removing.");
-    //     assert!(!arch
-    //         .file_exists(site, model, &init_time)
-    //         .expect("Error checking db"));
-    // }
+        assert!(arch
+            .file_exists(&kmso, &snd_type, &init_time)
+            .expect("Error checking db"));
+        arch.remove(&kmso, &snd_type, &init_time)
+            .expect("Error while removing.");
+        assert!(!arch
+            .file_exists(&kmso, &snd_type, &init_time)
+            .expect("Error checking db"));
+    }
 }
