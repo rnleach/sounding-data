@@ -54,10 +54,10 @@ impl Archive {
             "BEGIN;
 
             CREATE TABLE types (
-                id          INTEGER PRIMARY KEY,  -- Used as foreign key in other tables
-                type        TEXT UNIQUE NOT NULL, -- GFS, NAM, NAM4KM, MOBIL, RAWINSONDE, 
-                description TEXT,                 -- Human readable description
-                observed    INT NOT NULL          -- 0 if false (e.g. model data), 1 if observed
+                id       INTEGER PRIMARY KEY,  -- Used as foreign key in other tables
+                type     TEXT UNIQUE NOT NULL, -- GFS, NAM, NAM4KM, MOBIL, RAWINSONDE, 
+                interval INTEGER,              -- Hours between model runs/launches/etc.
+                observed INT NOT NULL          -- 0 if false (e.g. model data), 1 if observed
             );
 
             CREATE TABLE sites (
@@ -855,38 +855,22 @@ mod unit {
 
         let gfs = SoundingType::new_model("GFS", 6);
         let nam = SoundingType::new_model("NAM", 6);
-        let mut sounding_types = HashSet::new();
-        sounding_types.insert(gfs.clone());
-        sounding_types.insert(nam.clone());
 
         let first = NaiveDate::from_ymd(2017, 4, 1).and_hms(0, 0, 0);
         let last = NaiveDate::from_ymd(2017, 4, 1).and_hms(18, 0, 0);
-        let mut range = HashMap::new();
-        range.insert(gfs.clone(), (first, last));
-        range.insert(nam.clone(), (first, last));
 
-        let mut missing = HashMap::new();
-        missing.insert(
-            nam.clone(),
-            vec![(
-                NaiveDate::from_ymd(2017, 4, 1).and_hms(6, 0, 0),
-                NaiveDate::from_ymd(2017, 4, 1).and_hms(6, 0, 0),
-            )],
-        );
-
-        let gfs_list = vec![Location::new(46.92, -114.08, 972.0, None)];
-        let nam_list = vec![Location::new(46.87, -114.16, 1335.0, None)];
-        let mut locations = HashMap::new();
-        locations.insert(gfs.clone(), gfs_list);
-        locations.insert(nam.clone(), nam_list);
-
-        let expected = Inventory {
-            site: site.clone(),
-            sounding_types,
-            range,
-            missing,
-            locations,
-        };
+        let expected = Inventory::new(site.clone())
+            .add_update_range(gfs.clone(), (first, last))
+            .add_update_range(nam.clone(), (first, last))
+            .add_missing_range(
+                nam.clone(),
+                (
+                    NaiveDate::from_ymd(2017, 4, 1).and_hms(6, 0, 0),
+                    NaiveDate::from_ymd(2017, 4, 1).and_hms(6, 0, 0),
+                ),
+            )
+            .add_location(gfs, Location::new(46.92, -114.08, 972.0, None))
+            .add_location(nam.clone(), Location::new(46.87, -114.16, 1335.0, None));
         assert_eq!(arch.inventory(&site, &nam).unwrap(), expected);
     }
 

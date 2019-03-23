@@ -53,6 +53,28 @@ impl Location {
         }
     }
 
+    /// Add elevation in meters data to a location.
+    pub fn with_elevation<T>(self, elev: T) -> Self
+    where
+        Option<f64>: From<T>,
+    {
+        Location {
+            elevation_m: Option::from(elev),
+            ..self
+        }
+    }
+
+    /// Add timezone data to a location, offset from UTC in seconds.
+    pub fn with_tz_offset<T>(self, tz_offset: T) -> Self
+    where
+        Option<i32>: From<T>,
+    {
+        Location {
+            tz_offset: Option::from(tz_offset),
+            ..self
+        }
+    }
+
     /// Get the latitude in degrees.
     pub fn latitude(&self) -> f64 {
         self.latitude
