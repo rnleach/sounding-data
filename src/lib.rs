@@ -7,7 +7,7 @@ pub use crate::errors::BufkitDataErr;
 pub use crate::inventory::Inventory;
 pub use crate::location::Location;
 pub use crate::site::{Site, StateProv};
-pub use crate::sounding_type::{SoundingType, FileType};
+pub use crate::sounding_type::{FileType, SoundingType};
 
 //
 // Implementation only

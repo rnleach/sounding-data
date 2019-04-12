@@ -1,5 +1,5 @@
 use crate::errors::BufkitDataErr;
-use rusqlite::{Connection, OptionalExtension, types::ToSql};
+use rusqlite::{types::ToSql, Connection, OptionalExtension};
 
 /// A geographic location.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -107,28 +107,32 @@ impl Location {
         self.id > 0
     }
 
-    pub(crate) fn id(&self) ->i64 {
+    pub(crate) fn id(&self) -> i64 {
         self.id
     }
 }
 
 /// Insert or update the location information in the database.
 #[inline]
-pub(crate) fn insert_or_update_location(db: &Connection, location: Location) -> Result<Location, BufkitDataErr> {
-    
-    if let Some(row_id) = db.query_row(
+pub(crate) fn insert_or_update_location(
+    db: &Connection,
+    location: Location,
+) -> Result<Location, BufkitDataErr> {
+    if let Some(row_id) = db
+        .query_row(
             "
                 SELECT rowid 
                 FROM locations 
                 WHERE latitude = ?1 AND longitude = ?2 and elevation_meters = ?3
             ",
-        &[
-            &((location.latitude * 1_000_000.0) as i64), 
-            &((location.longitude * 1_000_000.0) as i64),  
-            &location.elevation_m as &ToSql,
-        ],
-        |row| row.get::<_,i64>(0),
-    ).optional()?
+            &[
+                &((location.latitude * 1_000_000.0) as i64),
+                &((location.longitude * 1_000_000.0) as i64),
+                &location.elevation_m as &ToSql,
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
     {
         // row already exists - so update
         db.execute(
@@ -138,29 +142,33 @@ pub(crate) fn insert_or_update_location(db: &Connection, location: Location) -> 
                 = (?2)
                 WHERE id = ?1
             ",
-            &[
-                &location.id, 
-                &location.tz_offset as &ToSql,
-            ],
+            &[&location.id, &location.tz_offset as &ToSql],
         )?;
-        
-        Ok(Location {id: row_id, ..location})
+
+        Ok(Location {
+            id: row_id,
+            ..location
+        })
     } else {
         // insert
         db.execute(
             "
                 INSERT INTO locations(latitude, longitude, elevation_meters, tz_offset_seconds) 
                 VALUES(?1, ?2, ?3, ?4)
-            ", 
+            ",
             &[
-                &((location.latitude * 1_000_000.0) as i64), 
-                &((location.latitude * 1_000_000.0) as i64), 
-                &location.elevation_m as &ToSql, 
+                &((location.latitude * 1_000_000.0) as i64),
+                &((location.latitude * 1_000_000.0) as i64),
+                &location.elevation_m as &ToSql,
                 &location.tz_offset,
-            ])?;
+            ],
+        )?;
 
         let row_id = db.last_insert_rowid();
-        Ok(Location {id: row_id, ..location})
+        Ok(Location {
+            id: row_id,
+            ..location
+        })
     }
 }
 

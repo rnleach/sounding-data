@@ -1,11 +1,11 @@
 use crate::errors::BufkitDataErr;
-use rusqlite::{Connection, types::ToSql, OptionalExtension};
-use strum_macros::{AsStaticStr, EnumString};
+use rusqlite::{types::ToSql, Connection, OptionalExtension};
 use strum::AsStaticRef;
+use strum_macros::{AsStaticStr, EnumString};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SoundingType {
-    observed: bool,             // False if it is a model generated sounding
+    observed: bool, // False if it is a model generated sounding
     file_type: FileType,
     source: String,             // Description such as model name or RAWIN_SONDE
     hours_between: Option<u16>, // Hours between observations or model initializations
@@ -72,7 +72,7 @@ impl SoundingType {
         self.file_type
     }
 
-    pub(crate) fn id(&self) ->i64 {
+    pub(crate) fn id(&self) -> i64 {
         self.id
     }
 }
@@ -88,9 +88,17 @@ pub(crate) fn retrieve_sounding_type(
 
 /// Insert or update the sounding type information in the database.
 #[inline]
-pub(crate) fn insert_or_update_sounding_type(db: &Connection, sounding_type: SoundingType) -> Result<SoundingType, BufkitDataErr> {
-    if let Some(row_id) = db.query_row("SELECT rowid FROM types where type = ?1", 
-        &[sounding_type.source()], |row| row.get::<_,i64>(0)).optional()?
+pub(crate) fn insert_or_update_sounding_type(
+    db: &Connection,
+    sounding_type: SoundingType,
+) -> Result<SoundingType, BufkitDataErr> {
+    if let Some(row_id) = db
+        .query_row(
+            "SELECT rowid FROM types where type = ?1",
+            &[sounding_type.source()],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
     {
         // row already exists - so update
         db.execute(
@@ -101,35 +109,42 @@ pub(crate) fn insert_or_update_sounding_type(db: &Connection, sounding_type: Sou
                 WHERE type = ?1
             ",
             &[
-                &sounding_type.source, 
-                &sounding_type.hours_between as &ToSql, 
+                &sounding_type.source,
+                &sounding_type.hours_between as &ToSql,
                 &sounding_type.observed,
             ],
         )?;
-        
-        Ok(SoundingType {id: row_id, ..sounding_type})
+
+        Ok(SoundingType {
+            id: row_id,
+            ..sounding_type
+        })
     } else {
         // insert
         db.execute(
             "
                 INSERT INTO types(type, file_type, interval, observed) 
                 VALUES(?1, ?2, ?3, ?4)
-            ", 
+            ",
             &[
                 &sounding_type.source,
                 &sounding_type.file_type.as_static() as &ToSql,
-                &sounding_type.hours_between as &ToSql, 
+                &sounding_type.hours_between as &ToSql,
                 &sounding_type.observed,
-            ])?;
+            ],
+        )?;
 
         let row_id = db.last_insert_rowid();
-        Ok(SoundingType {id: row_id, ..sounding_type})
+        Ok(SoundingType {
+            id: row_id,
+            ..sounding_type
+        })
     }
 }
 
 /// Flag for how the sounding data is encoded in the file
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString, AsStaticStr)]
-pub enum FileType{
+pub enum FileType {
     /// A bufkit encoded file.
     BUFKIT,
     /// A bufr encoded file.

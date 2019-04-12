@@ -2,7 +2,7 @@
 
 use chrono::{FixedOffset, NaiveDate, NaiveDateTime};
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
-use metfor::{Quantity};
+use metfor::Quantity;
 use rusqlite::{types::ToSql, Connection, OpenFlags, Row, NO_PARAMS};
 use sounding_analysis::Analysis;
 use std::{
@@ -16,11 +16,11 @@ use std::{
 use strum::AsStaticRef;
 
 use crate::{
-    errors::BufkitDataErr, 
+    errors::BufkitDataErr,
     inventory::Inventory,
-    location::{Location, insert_or_update_location},
-    site::{Site, StateProv, insert_or_update_site}, 
-    sounding_type::{SoundingType, insert_or_update_sounding_type},
+    location::{insert_or_update_location, Location},
+    site::{insert_or_update_site, Site, StateProv},
+    sounding_type::{insert_or_update_sounding_type, SoundingType},
 };
 
 /// The archive.
@@ -320,11 +320,7 @@ impl Archive {
 
         let num_records: i32 = self.db_conn.query_row(
             "SELECT COUNT(*) FROM files WHERE site_id = ?1 AND type_id = ?2 AND init_time = ?3",
-            &[
-                &site.id(),
-                &sounding_type.id(),
-                init_time as &ToSql,
-            ],
+            &[&site.id(), &sounding_type.id(), init_time as &ToSql],
             |row| row.get_checked(0),
         )??;
 
@@ -355,7 +351,6 @@ impl Archive {
         init_time: &NaiveDateTime,
         file_name: &OsStr,
     ) -> Result<(), BufkitDataErr> {
-
         let site = if site.is_known() {
             site
         } else {
@@ -397,17 +392,16 @@ impl Archive {
             "
                 INSERT OR REPLACE INTO files (type_id, site_id, location_id, init_time, file_name)
                 VALUES (?1, ?2, ?3, ?4, ?5)
-            ", 
+            ",
             &[
-                &sounding_type.id(), 
-                &site.id(), 
-                &location.id(), 
-                &init_time as &ToSql, 
+                &sounding_type.id(),
+                &site.id(),
+                &location.id(),
+                &init_time as &ToSql,
                 &fname.to_string_lossy(),
             ],
         )?;
 
-        
         // Open the file in binary mode and compress it into a file with the above found name
 
         Ok(())
@@ -419,7 +413,10 @@ impl Archive {
     }
 
     /// Insert or update a sounding type.
-    pub fn update_or_insert_sounding_type(&self, sounding_type: SoundingType) -> Result<SoundingType, BufkitDataErr> {
+    pub fn update_or_insert_sounding_type(
+        &self,
+        sounding_type: SoundingType,
+    ) -> Result<SoundingType, BufkitDataErr> {
         crate::sounding_type::insert_or_update_sounding_type(&self.db_conn, sounding_type)
     }
 
@@ -449,17 +446,15 @@ impl Archive {
         sounding_type: &SoundingType,
         init_time: &NaiveDateTime,
     ) -> Result<Vec<Analysis>, BufkitDataErr> {
-
         debug_assert!(site.id() > 0, "Site not checked or added in index");
-        debug_assert!(sounding_type.id() > 0, "Sounding type not checked or added in index.");
+        debug_assert!(
+            sounding_type.id() > 0,
+            "Sounding type not checked or added in index."
+        );
 
         let file_name: String = self.db_conn.query_row(
             "SELECT file_name FROM files WHERE site_id = ?1 AND type_id = ?2 AND init_time = ?3",
-            &[
-                &site.id(),
-                &sounding_type.id(),
-                init_time as &ToSql,
-            ],
+            &[&site.id(), &sounding_type.id(), init_time as &ToSql],
             |row| row.get_checked(0),
         )??;
 
@@ -501,7 +496,8 @@ impl Archive {
             file_string,
             sounding_type.source(),
             site.short_name(),
-        ).into()
+        )
+        .into()
     }
 
     fn parse_compressed_file_name(fname: &OsStr) -> Option<(NaiveDateTime, SoundingType, String)> {
@@ -587,7 +583,7 @@ impl Archive {
 mod unit {
     use super::*;
 
-    use crate::{Location, FileType};
+    use crate::{FileType, Location};
     use std::collections::{HashMap, HashSet};
     use std::fs::read_dir;
 
@@ -611,8 +607,8 @@ mod unit {
     }
 
     // Function to fetch a list of test files.
-    fn get_test_data() -> Result<Vec<(Site, SoundingType, NaiveDateTime, Location, OsString)>, BufkitDataErr>
-    {
+    fn get_test_data(
+    ) -> Result<Vec<(Site, SoundingType, NaiveDateTime, Location, OsString)>, BufkitDataErr> {
         let path = PathBuf::new().join("example_data");
 
         let files = read_dir(path)?
@@ -654,10 +650,9 @@ mod unit {
 
             let init_time = snd.valid_time().expect("NO VALID TIME?!");
 
-            let (lat,lon) = snd.station_info().location().unwrap();
+            let (lat, lon) = snd.station_info().location().unwrap();
             let elev_m = snd.station_info().elevation().unwrap().unpack();
             let loc = Location::new(lat, lon, elev_m as i32, None);
-
 
             to_return.push((site.to_owned(), model, init_time, loc, OsString::from(path)))
         }
@@ -731,7 +726,10 @@ mod unit {
 
         for site in retrieved_sites {
             println!("{:#?}", site);
-            assert!(test_sites.iter().find(|st| st.short_name() == site.short_name()).is_some());
+            assert!(test_sites
+                .iter()
+                .find(|st| st.short_name() == site.short_name())
+                .is_some());
         }
     }
 
@@ -910,11 +908,21 @@ mod unit {
         let test_data = get_test_data().expect("Error loading test data.");
 
         for (site, sounding_type, init_time, loc, file_name) in test_data {
-            arch.add(site.clone(), sounding_type.clone(), loc, &init_time, &file_name)
-                .expect("Failure to add.");
+            arch.add(
+                site.clone(),
+                sounding_type.clone(),
+                loc,
+                &init_time,
+                &file_name,
+            )
+            .expect("Failure to add.");
 
-            let site = arch.site_info(site.short_name()).expect("Error retrieving site.");
-            let sounding_type = arch.sounding_type(sounding_type.source()).expect("Error retrieving sounding_type");
+            let site = arch
+                .site_info(site.short_name())
+                .expect("Error retrieving site.");
+            let sounding_type = arch
+                .sounding_type(sounding_type.source())
+                .expect("Error retrieving sounding_type");
 
             let recovered_anal = arch
                 .retrieve(&site, &sounding_type, &init_time)

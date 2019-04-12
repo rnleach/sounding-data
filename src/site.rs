@@ -1,8 +1,8 @@
 use crate::errors::BufkitDataErr;
-use rusqlite::{Connection, OptionalExtension, types::ToSql, Row, NO_PARAMS};
+use rusqlite::{types::ToSql, Connection, OptionalExtension, Row, NO_PARAMS};
 use std::str::FromStr;
-use strum_macros::{AsStaticStr, EnumIter, EnumString};
 use strum::AsStaticRef;
+use strum_macros::{AsStaticStr, EnumIter, EnumString};
 
 /// Description of a site with a sounding.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,7 +114,7 @@ impl Site {
         self.id > 0 // sqlite starts at row id = 1
     }
 
-    pub(crate) fn id(&self) ->i64 {
+    pub(crate) fn id(&self) -> i64 {
         self.id
     }
 
@@ -127,27 +127,29 @@ impl Site {
 }
 /// Retrieve the sounding type information from the database for the given source name.
 #[inline]
-pub(crate) fn retrieve_site(
-    db: &Connection,
-    short_name: &str,
-) -> Result<Site, BufkitDataErr> {
+pub(crate) fn retrieve_site(db: &Connection, short_name: &str) -> Result<Site, BufkitDataErr> {
     db.query_row(
         "
             SELECT id, short_name, long_name, state, notes, mobile_sounding_site 
             FROM sites 
             WHERE short_name = ?1
-        ", 
+        ",
         &[&short_name],
         parse_row_to_site,
-    )?.map_err(BufkitDataErr::from)
+    )?
+    .map_err(BufkitDataErr::from)
 }
 
 /// Insert or update the site information in the database.
 #[inline]
 pub(crate) fn insert_or_update_site(db: &Connection, site: Site) -> Result<Site, BufkitDataErr> {
-    
-    if let Some(row_id) = db.query_row("SELECT rowid FROM sites WHERE short_name = ?1", 
-        &[site.short_name()], |row| row.get::<_,i64>(0)).optional()?
+    if let Some(row_id) = db
+        .query_row(
+            "SELECT rowid FROM sites WHERE short_name = ?1",
+            &[site.short_name()],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
     {
         // row already exists - so update
         db.execute(
@@ -158,32 +160,33 @@ pub(crate) fn insert_or_update_site(db: &Connection, site: Site) -> Result<Site,
                 WHERE short_name = ?1
             ",
             &[
-                &site.short_name, 
-                &site.long_name as &ToSql, 
-                &site.state_prov().map(|st| st.as_static()) as &ToSql, 
-                &site.notes(), 
+                &site.short_name,
+                &site.long_name as &ToSql,
+                &site.state_prov().map(|st| st.as_static()) as &ToSql,
+                &site.notes(),
                 &site.is_mobile(),
             ],
         )?;
 
-        Ok(Site {id: row_id, ..site})
+        Ok(Site { id: row_id, ..site })
     } else {
         // insert
         db.execute(
             "
                 INSERT INTO sites(short_name, long_name, state, notes, mobile_sounding_site) 
                 VALUES(?1, ?2, ?3, ?4, ?5)
-            ", 
+            ",
             &[
-                &site.short_name, 
-                &site.long_name as &ToSql, 
-                &site.state_prov().map(|st| st.as_static()) as &ToSql, 
-                &site.notes(), 
+                &site.short_name,
+                &site.long_name as &ToSql,
+                &site.state_prov().map(|st| st.as_static()) as &ToSql,
+                &site.notes(),
                 &site.is_mobile(),
-            ])?;
+            ],
+        )?;
 
         let row_id = db.last_insert_rowid();
-        Ok(Site {id: row_id, ..site})
+        Ok(Site { id: row_id, ..site })
     }
 }
 
@@ -197,12 +200,12 @@ pub(crate) fn all_sites(db: &Connection) -> Result<Vec<Site>, BufkitDataErr> {
         ",
     )?;
 
-        let vals: Result<Vec<Site>, BufkitDataErr> = stmt
-            .query_and_then(NO_PARAMS, parse_row_to_site)?
-            .map(|res| res.map_err(BufkitDataErr::Database))
-            .collect();
+    let vals: Result<Vec<Site>, BufkitDataErr> = stmt
+        .query_and_then(NO_PARAMS, parse_row_to_site)?
+        .map(|res| res.map_err(BufkitDataErr::Database))
+        .collect();
 
-        vals
+    vals
 }
 
 fn parse_row_to_site(row: &Row) -> Result<Site, rusqlite::Error> {
@@ -298,7 +301,7 @@ pub enum StateProv {
 mod unit {
     use super::*;
     use rusqlite::{Connection, OpenFlags};
-    use std::{str::FromStr, error::Error};
+    use std::{error::Error, str::FromStr};
     use strum::{AsStaticRef, IntoEnumIterator};
     use tempdir::TempDir;
 
@@ -347,7 +350,7 @@ mod unit {
     }
 
     #[test]
-    fn test_insert_retrieve_site() -> Result<(), Box<Error>>{
+    fn test_insert_retrieve_site() -> Result<(), Box<Error>> {
         let tmp = TempDir::new("bufkit-data-test-archive")?;
         let db_file = tmp.as_ref().join("test_inxex.sqlite");
         let db_conn = Connection::open_with_flags(
