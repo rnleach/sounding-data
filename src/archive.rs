@@ -2,6 +2,7 @@
 
 use chrono::{FixedOffset, NaiveDate, NaiveDateTime};
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
+use metfor::{Quantity};
 use rusqlite::{types::ToSql, Connection, OpenFlags, Row, NO_PARAMS};
 use sounding_analysis::Analysis;
 use std::{
@@ -14,10 +15,13 @@ use std::{
 };
 use strum::AsStaticRef;
 
-use crate::errors::BufkitDataErr;
-use crate::inventory::Inventory;
-use crate::site::{Site, StateProv};
-use crate::sounding_type::SoundingType;
+use crate::{
+    errors::BufkitDataErr, 
+    inventory::Inventory,
+    location::{Location, insert_or_update_location},
+    site::{Site, StateProv, insert_or_update_site}, 
+    sounding_type::{SoundingType, insert_or_update_sounding_type},
+};
 
 /// The archive.
 #[derive(Debug)]
@@ -50,46 +54,7 @@ impl Archive {
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
         )?;
 
-        db_conn.execute_batch(
-            "BEGIN;
-
-            CREATE TABLE types (
-                id       INTEGER PRIMARY KEY,  -- Used as foreign key in other tables
-                type     TEXT UNIQUE NOT NULL, -- GFS, NAM, NAM4KM, MOBIL, RAWINSONDE, 
-                interval INTEGER,              -- Hours between model runs/launches/etc.
-                observed INT NOT NULL          -- 0 if false (e.g. model data), 1 if observed
-            );
-
-            CREATE TABLE sites (
-                id                   INTEGER PRIMARY KEY,
-                short_name           TEXT UNIQUE NOT NULL, -- External identifier, WMO#, ICAO id...
-                long_name            TEXT DEFUALT NULL,    -- common name
-                state                TEXT DEDAULT NULL,    -- State/Providence code
-                notes                TEXT DEFAULT NULL,    -- Human readable notes
-                mobile_sounding_site INTEGER DEFAULT 0     -- true if this is a a mobile platform
-            );
-
-            CREATE TABLE locations (
-                id                INTEGER PRIMARY KEY,
-                latitude          NUMERIC DEFAULT NULL, -- Decimal degrees
-                longitude         NUMERIC DEFAULT NULL, -- Decimal degrees
-                elevation_meters  INT     DEFAULT NULL, 
-                tz_offset_seconds INT     DEFAULT NULL  -- Offset from UTC in seconds
-            );
-
-            CREATE TABLE files (
-                type_id     INTEGER     NOT NULL,
-                site_id     INTEGER     NOT NULL,
-                location_id INTEGER     NOT NULL,
-                init_time   TEXT        NOT NULL,
-                file_name   TEXT UNIQUE NOT NULL,
-                FOREIGN KEY (type_id)     REFERENCES types(id),
-                FOREIGN KEY (site_id)     REFERENCES sites(id),
-                FOREIGN KEY (location_id) REFERENCES locations(id)
-            );
-
-            COMMIT;",
-        )?;
+        db_conn.execute_batch(include_str!("create_index.sql"))?;
 
         Ok(Archive {
             root,
@@ -189,71 +154,22 @@ impl Archive {
     // ---------------------------------------------------------------------------------------------
     // Query or modify site metadata
     // ---------------------------------------------------------------------------------------------
-
-    fn parse_row_to_site(row: &Row) -> Result<Site, rusqlite::Error> {
-        let short_name: String = row.get_checked(0)?;
-        let long_name: Option<String> = row.get_checked(1)?;
-        let notes: Option<String> = row.get_checked(3)?;
-        let is_mobile = row.get_checked(4)?;
-        let state: Option<StateProv> = row
-            .get_checked::<_, String>(2)
-            .ok()
-            .and_then(|a_string| StateProv::from_str(&a_string).ok());
-
-        Ok(Site::new(&short_name)
-            .with_long_name(long_name)
-            .with_notes(notes)
-            .with_state_prov(state)
-            .set_mobile(is_mobile))
-    }
-
     fn short_name_to_site(&self, short_name: &str) -> Result<Site, BufkitDataErr> {
-        unimplemented!()
+        crate::site::retrieve_site(&self.db_conn, short_name)
     }
 
     fn sounding_type_from_str(&self, sounding_type: &str) -> Result<SoundingType, BufkitDataErr> {
-        unimplemented!()
+        crate::sounding_type::retrieve_sounding_type(&self.db_conn, sounding_type)
     }
 
     /// Retrieve a list of sites in the archive.
     pub fn sites(&self) -> Result<Vec<Site>, BufkitDataErr> {
-        let mut stmt = self.db_conn.prepare(
-            "
-                    SELECT 
-                        short_name,
-                        long_name,
-                        state,
-                        notes,
-                        mobile_sounding_site 
-                    FROM sites;",
-        )?;
-
-        let vals: Result<Vec<Site>, BufkitDataErr> = stmt
-            .query_and_then(NO_PARAMS, Self::parse_row_to_site)?
-            .map(|res| res.map_err(BufkitDataErr::Database))
-            .collect();
-
-        vals
+        crate::site::all_sites(&self.db_conn)
     }
 
     /// Retrieve the information about a single site.
     pub fn site_info(&self, short_name: &str) -> Result<Site, BufkitDataErr> {
-        self.db_conn
-            .query_row_and_then(
-                "
-                SELECT 
-                    short_name,
-                    long_name,
-                    state,
-                    notes,
-                    mobile_sounding_site
-                FROM sites
-                WHERE short_name = ?1
-            ",
-                &[&short_name.to_uppercase()],
-                Self::parse_row_to_site,
-            )
-            .map_err(BufkitDataErr::Database)
+        crate::site::retrieve_site(&self.db_conn, short_name)
     }
 
     /// Modify a sites values.
@@ -263,7 +179,7 @@ impl Archive {
                 UPDATE sites 
                 SET (long_name, state, notes, mobile_sounding_site)
                 = (?2, ?3, ?4, ?5)
-                WHERE site = ?1
+                WHERE short_name = ?1
             ",
             &[
                 &site.short_name() as &ToSql,
@@ -298,7 +214,7 @@ impl Archive {
     pub fn site_exists(&self, short_name: &str) -> Result<bool, BufkitDataErr> {
         let number: i32 = self.db_conn.query_row(
             "SELECT COUNT(*) FROM sites WHERE short_name = ?1",
-            &[&short_name.to_uppercase()],
+            &[short_name],
             |row| row.get(0),
         )?;
 
@@ -399,18 +315,20 @@ impl Archive {
         sounding_type: &SoundingType,
         init_time: &NaiveDateTime,
     ) -> Result<bool, BufkitDataErr> {
-        // let num_records: i32 = self.db_conn.query_row(
-        //     "SELECT COUNT(*) FROM files WHERE site = ?1 AND model = ?2 AND init_time = ?3",
-        //     &[
-        //         &site_id.to_uppercase() as &ToSql,
-        //         &model.as_static() as &ToSql,
-        //         init_time as &ToSql,
-        //     ],
-        //     |row| row.get_checked(0),
-        // )??;
+        debug_assert!(site.id() > 0);
+        debug_assert!(sounding_type.id() > 0);
 
-        // Ok(num_records == 1)
-        unimplemented!()
+        let num_records: i32 = self.db_conn.query_row(
+            "SELECT COUNT(*) FROM files WHERE site_id = ?1 AND type_id = ?2 AND init_time = ?3",
+            &[
+                &site.id(),
+                &sounding_type.id(),
+                init_time as &ToSql,
+            ],
+            |row| row.get_checked(0),
+        )??;
+
+        Ok(num_records == 1)
     }
 
     /// Get the number of files stored in the archive.
@@ -431,21 +349,95 @@ impl Archive {
     /// Add a file to the archive.
     pub fn add(
         &self,
-        site: &Site,
-        sounding_type: &SoundingType,
+        site: Site,
+        sounding_type: SoundingType,
+        location: Location,
         init_time: &NaiveDateTime,
         file_name: &OsStr,
     ) -> Result<(), BufkitDataErr> {
-        // Fetch or insert the type and get id
-        // Fetch or insert the site and get the id
-        // Fetch or insert the location and get the id
-        // Build a file name
-        // Check if this file or (site, type, init_time) exist in the database
-        // If the file exists with a different site, type, or init_time return an error
-        // If the site, type, init_time are the same, delete the file in the archive and add
-        //     this one in its place
-        // If there is no conflict, add the information to the database index
+
+        let site = if site.is_known() {
+            site
+        } else {
+            self.update_or_insert_site(site)?
+        };
+
+        let sounding_type = if sounding_type.is_known() {
+            sounding_type
+        } else {
+            self.update_or_insert_sounding_type(sounding_type)?
+        };
+
+        let fname: OsString = self.compressed_file_name(&site, &sounding_type, init_time);
+
+        let sounding_type = if sounding_type.is_known() {
+            sounding_type
+        } else {
+            insert_or_update_sounding_type(&self.db_conn, sounding_type)?
+        };
+
+        let site = if site.is_known() {
+            site
+        } else {
+            insert_or_update_site(&self.db_conn, site)?
+        };
+
+        let location = if location.is_known() {
+            location
+        } else {
+            insert_or_update_location(&self.db_conn, location)?
+        };
+
+        let mut in_file = File::open(file_name)?;
+        let out_file = File::create(self.file_dir.join(&fname))?;
+        let mut encoder = GzEncoder::new(out_file, Compression::default());
+        std::io::copy(&mut in_file, &mut encoder)?;
+
+        self.db_conn.execute(
+            "
+                INSERT OR REPLACE INTO files (type_id, site_id, location_id, init_time, file_name)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+            ", 
+            &[
+                &sounding_type.id(), 
+                &site.id(), 
+                &location.id(), 
+                &init_time as &ToSql, 
+                &fname.to_string_lossy(),
+            ],
+        )?;
+
+        
         // Open the file in binary mode and compress it into a file with the above found name
+
+        Ok(())
+    }
+
+    /// Retrieve the sounding type information for a sounding with the specified source.
+    pub fn sounding_type(&self, sounding_type: &str) -> Result<SoundingType, BufkitDataErr> {
+        crate::sounding_type::retrieve_sounding_type(&self.db_conn, sounding_type)
+    }
+
+    /// Insert or update a sounding type.
+    pub fn update_or_insert_sounding_type(&self, sounding_type: SoundingType) -> Result<SoundingType, BufkitDataErr> {
+        crate::sounding_type::insert_or_update_sounding_type(&self.db_conn, sounding_type)
+    }
+
+    /// Retrieve the site information.
+    pub fn site(&self, site: &str) -> Result<Site, BufkitDataErr> {
+        crate::site::retrieve_site(&self.db_conn, site)
+    }
+
+    /// Insert or update a site.
+    pub fn update_or_insert_site(&self, site: Site) -> Result<Site, BufkitDataErr> {
+        crate::site::insert_or_update_site(&self.db_conn, site)
+    }
+
+    fn load_data(&self, file_name: &str) -> Result<Vec<Analysis>, BufkitDataErr> {
+        let file = File::open(self.file_dir.join(file_name))?;
+        let mut decoder = GzDecoder::new(file);
+        let mut s = String::new();
+        decoder.read_to_string(&mut s)?;
 
         unimplemented!()
     }
@@ -457,22 +449,21 @@ impl Archive {
         sounding_type: &SoundingType,
         init_time: &NaiveDateTime,
     ) -> Result<Vec<Analysis>, BufkitDataErr> {
-        // let file_name: String = self.db_conn.query_row(
-        //     "SELECT file_name FROM files WHERE site = ?1 AND model = ?2 AND init_time = ?3",
-        //     &[
-        //         &site_id.to_uppercase() as &ToSql,
-        //         &model.as_static() as &ToSql,
-        //         init_time as &ToSql,
-        //     ],
-        //     |row| row.get_checked(0),
-        // )??;
 
-        // let file = File::open(self.file_dir.join(file_name))?;
-        // let mut decoder = GzDecoder::new(file);
-        // let mut s = String::new();
-        // decoder.read_to_string(&mut s)?;
-        // Ok(s)
-        unimplemented!()
+        debug_assert!(site.id() > 0, "Site not checked or added in index");
+        debug_assert!(sounding_type.id() > 0, "Sounding type not checked or added in index.");
+
+        let file_name: String = self.db_conn.query_row(
+            "SELECT file_name FROM files WHERE site_id = ?1 AND type_id = ?2 AND init_time = ?3",
+            &[
+                &site.id(),
+                &sounding_type.id(),
+                init_time as &ToSql,
+            ],
+            |row| row.get_checked(0),
+        )??;
+
+        self.load_data(&file_name)
     }
 
     /// Retrieve and uncompress a file, then save it in the given `export_dir`.
@@ -502,23 +493,15 @@ impl Archive {
         site: &Site,
         sounding_type: &SoundingType,
         init_time: &NaiveDateTime,
-    ) -> String {
-        // let file_string = init_time.format("%Y%m%d%HZ").to_string();
+    ) -> OsString {
+        let file_string = init_time.format("%Y%m%d%HZ").to_string();
 
-        // format!(
-        //     "{}_{}_{}.buf.gz",
-        //     file_string,
-        //     model.as_static(),
-        //     site_id.to_uppercase()
-        // )
-        unimplemented!()
-    }
-
-    fn retrieve_sounding_type_for(
-        &self,
-        sounding_type_as_str: &str,
-    ) -> Result<SoundingType, BufkitDataErr> {
-        unimplemented!()
+        format!(
+            "{}_{}_{}.gz",
+            file_string,
+            sounding_type.source(),
+            site.short_name(),
+        ).into()
     }
 
     fn parse_compressed_file_name(fname: &OsStr) -> Option<(NaiveDateTime, SoundingType, String)> {
@@ -604,7 +587,7 @@ impl Archive {
 mod unit {
     use super::*;
 
-    use crate::Location;
+    use crate::{Location, FileType};
     use std::collections::{HashMap, HashSet};
     use std::fs::read_dir;
 
@@ -628,7 +611,7 @@ mod unit {
     }
 
     // Function to fetch a list of test files.
-    fn get_test_data() -> Result<Vec<(Site, SoundingType, NaiveDateTime, OsString)>, BufkitDataErr>
+    fn get_test_data() -> Result<Vec<(Site, SoundingType, NaiveDateTime, Location, OsString)>, BufkitDataErr>
     {
         let path = PathBuf::new().join("example_data");
 
@@ -659,9 +642,9 @@ mod unit {
             let snd = anal.sounding();
 
             let model = if path.to_string_lossy().to_string().contains("gfs") {
-                SoundingType::new("GFS", false, 6)
+                SoundingType::new("GFS", false, FileType::BUFKIT, 6)
             } else {
-                SoundingType::new("NAM", false, 6)
+                SoundingType::new("NAM", false, FileType::BUFKIT, 6)
             };
             let site = if path.to_string_lossy().to_string().contains("kmso") {
                 Site::new("kmso")
@@ -671,7 +654,12 @@ mod unit {
 
             let init_time = snd.valid_time().expect("NO VALID TIME?!");
 
-            to_return.push((site.to_owned(), model, init_time, OsString::from(path)))
+            let (lat,lon) = snd.station_info().location().unwrap();
+            let elev_m = snd.station_info().elevation().unwrap().unpack();
+            let loc = Location::new(lat, lon, elev_m as i32, None);
+
+
+            to_return.push((site.to_owned(), model, init_time, loc, OsString::from(path)))
         }
 
         Ok(to_return)
@@ -681,8 +669,8 @@ mod unit {
     fn fill_test_archive(arch: &mut Archive) -> Result<(), BufkitDataErr> {
         let test_data = get_test_data().expect("Error loading test data.");
 
-        for (site, sounding_type, init_time, raw_data) in test_data {
-            arch.add(&site, &sounding_type, &init_time, &raw_data)?;
+        for (site, sounding_type, init_time, loc, fname) in test_data {
+            arch.add(site, sounding_type, loc, &init_time, &fname)?;
         }
         Ok(())
     }
@@ -721,7 +709,7 @@ mod unit {
                 .set_mobile(false),
             Site::new("ksea")
                 .with_long_name("Seattle".to_owned())
-                .with_notes("A coastal city with coffe and rain".to_owned())
+                .with_notes("A coastal city with coffee and rain".to_owned())
                 .with_state_prov(StateProv::WA)
                 .set_mobile(false),
             Site::new("kmso")
@@ -743,7 +731,7 @@ mod unit {
 
         for site in retrieved_sites {
             println!("{:#?}", site);
-            assert!(test_sites.iter().find(|st| **st == site).is_some());
+            assert!(test_sites.iter().find(|st| st.short_name() == site.short_name()).is_some());
         }
     }
 
@@ -774,7 +762,17 @@ mod unit {
             arch.add_site(site).expect("Error adding site.");
         }
 
-        assert_eq!(arch.site_info("ksea").unwrap(), test_sites[1]);
+        for site in test_sites {
+            let retr_site = arch.site_info(site.short_name()).unwrap();
+
+            assert_eq!(site.short_name(), retr_site.short_name());
+            assert_ne!(site.id(), retr_site.id());
+            assert!(site.id() <= 0);
+            assert!(retr_site.id() > 0);
+            assert_eq!(site.long_name(), retr_site.long_name());
+            assert_eq!(site.state_prov(), retr_site.state_prov());
+            assert_eq!(site.notes(), retr_site.notes());
+        }
     }
 
     #[test]
@@ -804,6 +802,12 @@ mod unit {
             arch.add_site(site).expect("Error adding site.");
         }
 
+        let retr_site = arch.site_info("kmso").unwrap();
+        assert_eq!(retr_site.short_name(), test_sites[2].short_name());
+        assert_eq!(retr_site.long_name(), test_sites[2].long_name());
+        assert_eq!(retr_site.notes(), test_sites[2].notes());
+        assert_eq!(retr_site.state_prov(), test_sites[2].state_prov());
+
         let zootown = Site::new("kmso")
             .with_long_name("Zootown".to_owned())
             .with_notes("Mountains, not coast.".to_owned())
@@ -812,8 +816,16 @@ mod unit {
 
         arch.set_site_info(&zootown).expect("Error updating site.");
 
-        assert_eq!(arch.site_info("kmso").unwrap(), zootown);
-        assert_ne!(arch.site_info("kmso").unwrap(), test_sites[2]);
+        let retr_site = arch.site_info("kmso").unwrap();
+        assert_eq!(retr_site.short_name(), test_sites[2].short_name());
+        assert_ne!(retr_site.long_name(), test_sites[2].long_name());
+        assert_ne!(retr_site.notes(), test_sites[2].notes());
+        assert_eq!(retr_site.state_prov(), test_sites[2].state_prov());
+
+        assert_eq!(retr_site.short_name(), zootown.short_name());
+        assert_eq!(retr_site.long_name(), zootown.long_name());
+        assert_eq!(retr_site.notes(), zootown.notes());
+        assert_eq!(retr_site.state_prov(), zootown.state_prov());
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -853,8 +865,8 @@ mod unit {
 
         let site = Site::new("kmso");
 
-        let gfs = SoundingType::new_model("GFS", 6);
-        let nam = SoundingType::new_model("NAM", 6);
+        let gfs = SoundingType::new_model("GFS", FileType::BUFKIT, 6);
+        let nam = SoundingType::new_model("NAM", FileType::BUFKIT, 6);
 
         let first = NaiveDate::from_ymd(2017, 4, 1).and_hms(0, 0, 0);
         let last = NaiveDate::from_ymd(2017, 4, 1).and_hms(18, 0, 0);
@@ -869,8 +881,8 @@ mod unit {
                     NaiveDate::from_ymd(2017, 4, 1).and_hms(6, 0, 0),
                 ),
             )
-            .add_location(gfs, Location::new(46.92, -114.08, 972.0, None))
-            .add_location(nam.clone(), Location::new(46.87, -114.16, 1335.0, None));
+            .add_location(gfs, Location::new(46.92, -114.08, 972, None))
+            .add_location(nam.clone(), Location::new(46.87, -114.16, 1335, None));
         assert_eq!(arch.inventory(&site, &nam).unwrap(), expected);
     }
 
@@ -897,9 +909,13 @@ mod unit {
 
         let test_data = get_test_data().expect("Error loading test data.");
 
-        for (site, sounding_type, init_time, file_name) in test_data {
-            arch.add(&site, &sounding_type, &init_time, &file_name)
+        for (site, sounding_type, init_time, loc, file_name) in test_data {
+            arch.add(site.clone(), sounding_type.clone(), loc, &init_time, &file_name)
                 .expect("Failure to add.");
+
+            let site = arch.site_info(site.short_name()).expect("Error retrieving site.");
+            let sounding_type = arch.sounding_type(sounding_type.source()).expect("Error retrieving sounding_type");
+
             let recovered_anal = arch
                 .retrieve(&site, &sounding_type, &init_time)
                 .expect("Failure to load.");
@@ -921,7 +937,7 @@ mod unit {
         fill_test_archive(&mut arch).expect("Error filling test archive.");
 
         let kmso = Site::new("kmso");
-        let snd_type = SoundingType::new_model("GFS", None);
+        let snd_type = SoundingType::new_model("GFS", FileType::BUFKIT, None);
 
         let init_time = arch
             .most_recent_valid_time(&kmso, &snd_type)
@@ -942,8 +958,8 @@ mod unit {
 
         fill_test_archive(&mut arch).expect("Error filling test archive.");
 
-        let kmso = Site::new("kmso");
-        let snd_type = SoundingType::new_model("GFS", None);
+        let kmso = arch.short_name_to_site("kmso").unwrap();
+        let snd_type = arch.sounding_type_from_str("GFS").unwrap();
 
         println!("Checking for files that should exist.");
         assert!(arch
@@ -1016,8 +1032,8 @@ mod unit {
         fill_test_archive(&mut arch).expect("Error filling test archive.");
 
         let init_time = NaiveDate::from_ymd(2017, 4, 1).and_hms(0, 0, 0);
-        let kmso = Site::new("kmso");
-        let snd_type = SoundingType::new_model("GFS", None);
+        let kmso = arch.short_name_to_site("kmso").unwrap();
+        let snd_type = arch.sounding_type_from_str("GFS").unwrap();
 
         assert!(arch
             .file_exists(&kmso, &snd_type, &init_time)
