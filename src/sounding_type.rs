@@ -1,5 +1,6 @@
 use crate::errors::BufkitDataErr;
-use rusqlite::{types::ToSql, Connection, OptionalExtension};
+use rusqlite::{types::ToSql, Connection, OptionalExtension, Row, NO_PARAMS};
+use std::str::FromStr;
 use strum::AsStaticRef;
 use strum_macros::{AsStaticStr, EnumString};
 
@@ -83,7 +84,15 @@ pub(crate) fn retrieve_sounding_type(
     db: &Connection,
     sounding_type_as_str: &str,
 ) -> Result<SoundingType, BufkitDataErr> {
-    unimplemented!()
+    db.query_row(
+        "
+            SELECT id, type, file_type, interval, observed
+            FROM types
+            WHERE type = ?1
+        ",
+        &[sounding_type_as_str],
+        parse_row_to_sounding_type,
+    )?
 }
 
 /// Insert or update the sounding type information in the database.
@@ -142,6 +151,39 @@ pub(crate) fn insert_or_update_sounding_type(
     }
 }
 
+/// Get a list of all the sounding types stored in the database
+#[inline]
+pub(crate) fn all_sounding_types(db: &Connection) -> Result<Vec<SoundingType>, BufkitDataErr> {
+    let mut stmt = db.prepare(
+        "
+            SELECT id, type, file_type, interval, observed 
+            FROM types;
+        ",
+    )?;
+
+    let vals: Result<Vec<SoundingType>, BufkitDataErr> = stmt
+        .query_and_then(NO_PARAMS, parse_row_to_sounding_type)?
+        .collect();
+
+    vals
+}
+
+fn parse_row_to_sounding_type(row: &Row) -> Result<SoundingType, BufkitDataErr> {
+    let id: i64 = row.get_checked(0)?;
+    let source = row.get_checked(1)?;
+    let file_type: FileType = FileType::from_str(&row.get_checked::<_, String>(2)?)?;
+    let hours_between = row.get_checked(3)?;
+    let observed = row.get_checked(4)?;
+
+    Ok(SoundingType {
+        id,
+        source,
+        file_type,
+        hours_between,
+        observed,
+    })
+}
+
 /// Flag for how the sounding data is encoded in the file
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString, AsStaticStr)]
 pub enum FileType {
@@ -149,4 +191,37 @@ pub enum FileType {
     BUFKIT,
     /// A bufr encoded file.
     BUFR,
+}
+
+/*--------------------------------------------------------------------------------------------------
+                                          Unit Tests
+--------------------------------------------------------------------------------------------------*/
+#[cfg(test)]
+mod unit {
+    use super::*;
+    use rusqlite::{Connection, OpenFlags};
+    use std::error::Error;
+    use tempdir::TempDir;
+
+    #[test]
+    fn test_insert_retrieve_sounding_type() -> Result<(), Box<Error>> {
+        let tmp = TempDir::new("bufkit-data-test-archive")?;
+        let db_file = tmp.as_ref().join("test_index.sqlite");
+        let db_conn = Connection::open_with_flags(
+            db_file,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+        )?;
+
+        db_conn.execute_batch(include_str!("create_index.sql"))?;
+
+        insert_or_update_sounding_type(
+            &db_conn,
+            SoundingType::new_model("GFS3", FileType::BUFKIT, 6),
+        )?;
+        let snd_tp = dbg!(retrieve_sounding_type(&db_conn, "GFS3"))?;
+
+        assert_eq!(snd_tp.source(), "GFS3");
+
+        Ok(())
+    }
 }

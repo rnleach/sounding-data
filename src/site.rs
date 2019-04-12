@@ -195,20 +195,18 @@ pub(crate) fn insert_or_update_site(db: &Connection, site: Site) -> Result<Site,
 pub(crate) fn all_sites(db: &Connection) -> Result<Vec<Site>, BufkitDataErr> {
     let mut stmt = db.prepare(
         "
-            SELECT id, short_name, long_name, state, notes, mobile_sounding_site 
+            SELECT id, short_name, long_name, state, notes, mobile_sounding_site
             FROM sites;
         ",
     )?;
 
-    let vals: Result<Vec<Site>, BufkitDataErr> = stmt
-        .query_and_then(NO_PARAMS, parse_row_to_site)?
-        .map(|res| res.map_err(BufkitDataErr::Database))
-        .collect();
+    let vals: Result<Vec<Site>, BufkitDataErr> =
+        stmt.query_and_then(NO_PARAMS, parse_row_to_site)?.collect();
 
     vals
 }
 
-fn parse_row_to_site(row: &Row) -> Result<Site, rusqlite::Error> {
+fn parse_row_to_site(row: &Row) -> Result<Site, BufkitDataErr> {
     let short_name: String = row.get_checked(1)?;
     let long_name: Option<String> = row.get_checked(2)?;
     let notes: Option<String> = row.get_checked(4)?;
@@ -352,7 +350,7 @@ mod unit {
     #[test]
     fn test_insert_retrieve_site() -> Result<(), Box<Error>> {
         let tmp = TempDir::new("bufkit-data-test-archive")?;
-        let db_file = tmp.as_ref().join("test_inxex.sqlite");
+        let db_file = tmp.as_ref().join("test_index.sqlite");
         let db_conn = Connection::open_with_flags(
             db_file,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
