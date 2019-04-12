@@ -1,4 +1,4 @@
-use crate::errors::BufkitDataErr;
+use crate::{errors::BufkitDataErr, site::Site};
 use rusqlite::{types::ToSql, Connection, OptionalExtension, Row, NO_PARAMS};
 use std::str::FromStr;
 use strum::AsStaticRef;
@@ -163,6 +163,28 @@ pub(crate) fn all_sounding_types(db: &Connection) -> Result<Vec<SoundingType>, B
 
     let vals: Result<Vec<SoundingType>, BufkitDataErr> = stmt
         .query_and_then(NO_PARAMS, parse_row_to_sounding_type)?
+        .collect();
+
+    vals
+}
+
+/// Get a list of all the sounding types stored in the database for a particular site
+#[inline]
+pub(crate) fn all_sounding_types_for_site(
+    db: &Connection,
+    site: &Site,
+) -> Result<Vec<SoundingType>, BufkitDataErr> {
+    let mut stmt = db.prepare(
+        "
+            SELECT id, type, file_type, interval, observed 
+            FROM types
+            WHERE types.id IN 
+                (SELECT DISTINCT files.type_id FROM files WHERE files.site_id = ?1);
+        ",
+    )?;
+
+    let vals: Result<Vec<SoundingType>, BufkitDataErr> = stmt
+        .query_and_then(&[&site.id()], parse_row_to_sounding_type)?
         .collect();
 
     vals

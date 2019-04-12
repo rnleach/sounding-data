@@ -271,20 +271,7 @@ impl Archive {
 
     /// Get a list of models in the archive for this site.
     pub fn sounding_types(&self, site: &Site) -> Result<Vec<SoundingType>, BufkitDataErr> {
-        // let mut stmt = self
-        //     .db_conn
-        //     .prepare("SELECT DISTINCT model FROM files WHERE site = ?1")?;
-
-        // let vals: Result<Vec<Model>, BufkitDataErr> = stmt
-        //     .query_map(&[&site_id.to_uppercase()], |row| {
-        //         let model: String = row.get(0);
-        //         Model::from_str(&model).map_err(|_err| BufkitDataErr::InvalidModelName(model))
-        //     })?
-        //     .flat_map(|res| res.map_err(BufkitDataErr::Database).into_iter())
-        //     .collect();
-
-        // vals
-        unimplemented!()
+        crate::sounding_type::all_sounding_types_for_site(&self.db_conn, site)
     }
 
     /// Retrieve the model initialization time of the most recent model in the archive.
@@ -293,19 +280,18 @@ impl Archive {
         site: &Site,
         sounding_type: &SoundingType,
     ) -> Result<NaiveDateTime, BufkitDataErr> {
-        // let init_time: NaiveDateTime = self.db_conn.query_row(
-        //     "
-        //         SELECT init_time FROM files
-        //         WHERE site = ?1 AND model = ?2
-        //         ORDER BY init_time DESC
-        //         LIMIT 1
-        //     ",
-        //     &[&site_id.to_uppercase(), model.as_static()],
-        //     |row| row.get_checked(0),
-        // )??;
+        let init_time: NaiveDateTime = self.db_conn.query_row(
+            "
+                SELECT init_time FROM files
+                WHERE site_id = ?1 AND type_id = ?2
+                ORDER BY init_time DESC
+                LIMIT 1
+            ",
+            &[&site.id(), &sounding_type.id()],
+            |row| row.get_checked(0),
+        )??;
 
-        // Ok(init_time)
-        unimplemented!()
+        Ok(init_time)
     }
 
     /// Check to see if a file is present in the archive and it is retrieveable.
@@ -478,9 +464,8 @@ impl Archive {
         site: &Site,
         sounding_type: &SoundingType,
     ) -> Result<Vec<Analysis>, BufkitDataErr> {
-        // let init_time = self.most_recent_valid_time(site_id, model)?;
-        // self.retrieve(site_id, model, &init_time)
-        unimplemented!()
+        let init_time = self.most_recent_valid_time(site, sounding_type)?;
+        self.retrieve(site, sounding_type, &init_time)
     }
 
     fn compressed_file_name(
@@ -550,29 +535,20 @@ impl Archive {
         sounding_type: &SoundingType,
         init_time: &NaiveDateTime,
     ) -> Result<(), BufkitDataErr> {
-        //     let file_name: String = self.db_conn.query_row(
-        //         "SELECT file_name FROM files WHERE site = ?1 AND model = ?2 AND init_time = ?3",
-        //         &[
-        //             &site_id.to_uppercase() as &ToSql,
-        //             &model.as_static() as &ToSql,
-        //             init_time as &ToSql,
-        //         ],
-        //         |row| row.get_checked(0),
-        //     )??;
+        let file_name: String = self.db_conn.query_row(
+            "SELECT file_name FROM files WHERE site_id = ?1 AND type_id = ?2 AND init_time = ?3",
+            &[&site.id(), &sounding_type.id(), init_time as &ToSql],
+            |row| row.get_checked(0),
+        )??;
 
-        //     remove_file(self.file_dir.join(file_name)).map_err(BufkitDataErr::IO)?;
+        remove_file(self.file_dir.join(file_name)).map_err(BufkitDataErr::IO)?;
 
-        //     self.db_conn.execute(
-        //         "DELETE FROM files WHERE site = ?1 AND model = ?2 AND init_time = ?3",
-        //         &[
-        //             &site_id.to_uppercase() as &ToSql,
-        //             &model.as_static() as &ToSql,
-        //             init_time as &ToSql,
-        //         ],
-        //     )?;
+        self.db_conn.execute(
+            "DELETE FROM files WHERE site_id = ?1 AND type_id = ?2 AND init_time = ?3",
+            &[&site.id(), &sounding_type.id(), init_time as &ToSql],
+        )?;
 
-        //     Ok(())
-        unimplemented!()
+        Ok(())
     }
 }
 
@@ -582,15 +558,15 @@ impl Archive {
 #[cfg(test)]
 mod unit {
     use super::*;
-
     use crate::{FileType, Location};
-    use std::collections::{HashMap, HashSet};
-    use std::fs::read_dir;
-
     use chrono::NaiveDate;
-    use tempdir::TempDir;
-
     use sounding_bufkit::BufkitFile;
+    use std::{
+        collections::{HashMap, HashSet},
+        error::Error,
+        fs::read_dir,
+    };
+    use tempdir::TempDir;
 
     // struct to hold temporary data for tests.
     struct TestArchive {
@@ -838,8 +814,10 @@ mod unit {
 
         fill_test_archive(&mut arch).expect("Error filling test archive.");
 
+        let site = arch.site_info("kmso").expect("Error retrieving site.");
+
         let types: Vec<String> = arch
-            .sounding_types(&Site::new("kmso"))
+            .sounding_types(&site)
             .expect("Error querying archive.")
             .iter()
             .map(|t| t.source().to_owned())
@@ -936,7 +914,7 @@ mod unit {
     }
 
     #[test]
-    fn test_get_most_recent_file() {
+    fn test_get_most_recent_file() -> Result<(), Box<Error>> {
         let TestArchive {
             tmp: _tmp,
             mut arch,
@@ -944,8 +922,8 @@ mod unit {
 
         fill_test_archive(&mut arch).expect("Error filling test archive.");
 
-        let kmso = Site::new("kmso");
-        let snd_type = SoundingType::new_model("GFS", FileType::BUFKIT, None);
+        let kmso = arch.site_info("kmso")?;
+        let snd_type = arch.sounding_type("GFS")?;;
 
         let init_time = arch
             .most_recent_valid_time(&kmso, &snd_type)
@@ -955,6 +933,8 @@ mod unit {
 
         arch.most_recent_file(&kmso, &snd_type)
             .expect("Failed to retrieve sounding.");
+
+        Ok(())
     }
 
     #[test]
