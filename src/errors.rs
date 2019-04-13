@@ -17,9 +17,9 @@ pub enum BufkitDataErr {
     // Inherited errors from std
     //
     /// Error forwarded from std
-    IO(::std::io::Error),
-    /// Error sending message...
-    SenderError(::std::sync::mpsc::SendError<String>),
+    Io(::std::io::Error),
+    /// Error converting bytes to utf8 string.
+    Utf8(::std::str::Utf8Error),
 
     //
     // Other forwarded errors
@@ -47,8 +47,8 @@ impl Display for BufkitDataErr {
         match self {
             SoundingAnalysis(err) => write!(f, "error from sounding-analysis: {}", err),
 
-            IO(err) => write!(f, "std lib io error: {}", err),
-            SenderError(err) => write!(f, "error sending message across threads: {}", err),
+            Io(err) => write!(f, "std lib io error: {}", err),
+            Utf8(err) => write!(f, "error converting bytes to utf8: {}", err),
 
             Database(err) => write!(f, "database error: {}", err),
             StrumError(err) => write!(f, "error forwarded from strum crate: {}", err),
@@ -70,7 +70,13 @@ impl From<AnalysisError> for BufkitDataErr {
 
 impl From<::std::io::Error> for BufkitDataErr {
     fn from(err: ::std::io::Error) -> BufkitDataErr {
-        BufkitDataErr::IO(err)
+        BufkitDataErr::Io(err)
+    }
+}
+
+impl From<::std::str::Utf8Error> for BufkitDataErr {
+    fn from(err: ::std::str::Utf8Error) -> BufkitDataErr {
+        BufkitDataErr::Utf8(err)
     }
 }
 

@@ -5,13 +5,14 @@ use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use metfor::Quantity;
 use rusqlite::{types::ToSql, Connection, OpenFlags, Row, NO_PARAMS};
 use sounding_analysis::Analysis;
+use sounding_bufkit::BufkitData;
 use std::{
     collections::HashSet,
     ffi::{OsStr, OsString},
     fs::{create_dir, create_dir_all, read_dir, remove_file, File},
     io::{Read, Write},
     path::{Path, PathBuf},
-    str::FromStr,
+    str::{from_utf8, FromStr},
 };
 use strum::AsStaticRef;
 
@@ -20,7 +21,7 @@ use crate::{
     inventory::Inventory,
     location::{insert_or_update_location, Location},
     site::{insert_or_update_site, Site, StateProv},
-    sounding_type::{insert_or_update_sounding_type, SoundingType},
+    sounding_type::{insert_or_update_sounding_type, FileType, SoundingType},
 };
 
 /// The archive.
@@ -407,13 +408,21 @@ impl Archive {
         crate::site::insert_or_update_site(&self.db_conn, site)
     }
 
-    fn load_data(&self, file_name: &str) -> Result<Vec<Analysis>, BufkitDataErr> {
+    fn load_data(&self, file_name: &str, ftype: FileType) -> Result<Vec<Analysis>, BufkitDataErr> {
         let file = File::open(self.file_dir.join(file_name))?;
         let mut decoder = GzDecoder::new(file);
-        let mut s = String::new();
-        decoder.read_to_string(&mut s)?;
+        let mut buf: Vec<u8> = vec![];
+        let _bytes_read = decoder.read_to_end(&mut buf)?;
 
-        unimplemented!()
+        match ftype {
+            FileType::BUFKIT => {
+                let bufkit_str = from_utf8(&buf)?;
+                let bufkit_data = BufkitData::init(bufkit_str, file_name)?;
+                let bufkit_anals: Vec<Analysis> = bufkit_data.into_iter().collect();
+                Ok(bufkit_anals)
+            }
+            FileType::BUFR => unimplemented!(),
+        }
     }
 
     /// Retrieve a file from the archive.
@@ -435,7 +444,7 @@ impl Archive {
             |row| row.get_checked(0),
         )??;
 
-        self.load_data(&file_name)
+        self.load_data(&file_name, sounding_type.file_type())
     }
 
     /// Retrieve and uncompress a file, then save it in the given `export_dir`.
@@ -532,7 +541,7 @@ impl Archive {
             |row| row.get_checked(0),
         )??;
 
-        remove_file(self.file_dir.join(file_name)).map_err(BufkitDataErr::IO)?;
+        remove_file(self.file_dir.join(file_name)).map_err(BufkitDataErr::Io)?;
 
         self.db_conn.execute(
             "DELETE FROM files WHERE site_id = ?1 AND type_id = ?2 AND init_time = ?3",
