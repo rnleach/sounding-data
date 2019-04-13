@@ -1,5 +1,5 @@
-use crate::errors::BufkitDataErr;
-use rusqlite::{types::ToSql, Connection, OptionalExtension};
+use crate::{errors::BufkitDataErr, site::Site, sounding_type::SoundingType};
+use rusqlite::{types::ToSql, Connection, OptionalExtension, Row};
 
 /// A geographic location.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -9,7 +9,7 @@ pub struct Location {
     /// Decimal degrees longitude
     longitude: f64,
     /// Elevation in meters.
-    elevation_m: Option<i32>,
+    elevation_m: i32,
     /// Time zone offset from UTC in seconds
     tz_offset: Option<i32>,
     /// row id in the database
@@ -21,10 +21,9 @@ impl Location {
     ///
     /// Panics if latitude is outside the canonical [-90, 90] range or longitude is outside the
     /// canonical [-180, 180] range.
-    pub fn new<T, U>(lat: f64, lon: f64, elev: T, tz_offset: U) -> Self
+    pub fn new<T>(lat: f64, lon: f64, elev: i32, tz_offset: T) -> Self
     where
         Option<i32>: From<T>,
-        Option<i32>: From<U>,
     {
         assert!(lat <= 90.0 && lat >= -90.0, "Latitude Range Error");
         assert!(lon <= 180.0 && lon >= -180.0, "Longitude Range Error");
@@ -32,7 +31,7 @@ impl Location {
         Location {
             latitude: lat,
             longitude: lon,
-            elevation_m: Option::from(elev),
+            elevation_m: elev,
             tz_offset: Option::from(tz_offset),
             id: -1,
         }
@@ -42,10 +41,9 @@ impl Location {
     ///
     /// Returns `None` the if latitude is outside the canonical [-90, 90] range or longitude is
     /// outside the canonical [-180, 180] range.
-    pub fn checked_new<T, U>(lat: f64, lon: f64, elev: T, tz_offset: U) -> Option<Self>
+    pub fn checked_new<T, U>(lat: f64, lon: f64, elev: i32, tz_offset: T) -> Option<Self>
     where
         Option<i32>: From<T>,
-        Option<i32>: From<U>,
     {
         if lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0 {
             None
@@ -53,7 +51,7 @@ impl Location {
             Some(Location {
                 latitude: lat,
                 longitude: lon,
-                elevation_m: Option::from(elev),
+                elevation_m: elev,
                 tz_offset: Option::from(tz_offset),
                 id: -1,
             })
@@ -61,12 +59,9 @@ impl Location {
     }
 
     /// Add elevation in meters data to a location.
-    pub fn with_elevation<T>(self, elev: T) -> Self
-    where
-        Option<i32>: From<T>,
-    {
+    pub fn with_elevation<T>(self, elev: i32) -> Self {
         Location {
-            elevation_m: Option::from(elev),
+            elevation_m: elev,
             ..self
         }
     }
@@ -93,7 +88,7 @@ impl Location {
     }
 
     /// Get the elevation in meters.
-    pub fn elevation(&self) -> Option<i32> {
+    pub fn elevation(&self) -> i32 {
         self.elevation_m
     }
 
@@ -158,7 +153,7 @@ pub(crate) fn insert_or_update_location(
             ",
             &[
                 &((location.latitude * 1_000_000.0) as i64),
-                &((location.latitude * 1_000_000.0) as i64),
+                &((location.longitude * 1_000_000.0) as i64),
                 &location.elevation_m as &ToSql,
                 &location.tz_offset,
             ],
@@ -170,6 +165,71 @@ pub(crate) fn insert_or_update_location(
             ..location
         })
     }
+}
+
+/// Retrieve the location associated with these coordinates.
+#[inline]
+pub(crate) fn retrieve_location(
+    db: &Connection,
+    latitude: f64,
+    longitude: f64,
+    elevation_m: i32,
+) -> Result<Location, BufkitDataErr> {
+    db.query_row(
+        "
+            SELECT id, latitude, longitude, elevation_meters, tz_offset_seconds 
+            FROM locations
+            WHERE latitude = ?1 AND longitude = ?2 AND elevation_meters = ?3
+        ",
+        &[
+            &((latitude * 1_000_000.0) as i64),
+            &((longitude * 1_000_000.0) as i64),
+            &elevation_m as &ToSql,
+        ],
+        parse_row_to_location,
+    )?
+}
+
+/// Retrieve all the different location associated with a given `Site` and `SoundingType`
+#[inline]
+pub(crate) fn retrieve_locations_for_site_and_type(
+    db: &Connection,
+    site: &Site,
+    sounding_type: &SoundingType,
+) -> Result<Vec<Location>, BufkitDataErr> {
+    let mut stmt = db.prepare(
+        "
+            SELECT id, latitude, longitude, elevation_meters, tz_offset_seconds 
+            FROM locations
+            WHERE locations.id IN
+                (SELECT DISTINCT files.location_id 
+                 FROM files 
+                 WHERE files.site_ID = ?1 AND files.type_id = ?2
+                );
+        ",
+    )?;
+
+    let vals: Result<Vec<Location>, BufkitDataErr> = stmt
+        .query_and_then(&[site.id(), sounding_type.id()], parse_row_to_location)?
+        .collect();
+
+    vals
+}
+
+fn parse_row_to_location(row: &Row) -> Result<Location, BufkitDataErr> {
+    let id: i64 = row.get_checked(0)?;
+    let latitude: f64 = row.get_checked::<_, i64>(1)? as f64 / 1_000_000.0;
+    let longitude: f64 = row.get_checked::<_, i64>(2)? as f64 / 1_000_000.0;
+    let elevation_m: i32 = row.get_checked(3)?;
+    let tz_offset: Option<i32> = row.get_checked(4)?;
+
+    Ok(Location {
+        id,
+        latitude,
+        longitude,
+        elevation_m,
+        tz_offset,
+    })
 }
 
 #[cfg(test)]

@@ -256,17 +256,8 @@ impl Archive {
     }
 
     /// Get an inventory of soundings for a site & model.
-    pub fn inventory(
-        &self,
-        site: &Site,
-        sounding_type: &SoundingType,
-    ) -> Result<Inventory, BufkitDataErr> {
-        // let init_times = self.init_times(site_id, model)?;
-
-        // let site = &self.site_info(site_id)?;
-
-        // Inventory::new(init_times, model, site)
-        unimplemented!()
+    pub fn inventory(&self, site: &Site) -> Result<Inventory, BufkitDataErr> {
+        crate::inventory::inventory(&self.db_conn, site.clone())
     }
 
     /// Get a list of models in the archive for this site.
@@ -831,7 +822,7 @@ mod unit {
     }
 
     #[test]
-    fn test_inventory() {
+    fn test_inventory() -> Result<(), Box<Error>> {
         let TestArchive {
             tmp: _tmp,
             mut arch,
@@ -839,27 +830,33 @@ mod unit {
 
         fill_test_archive(&mut arch).expect("Error filling test archive.");
 
-        let site = Site::new("kmso");
-
-        let gfs = SoundingType::new_model("GFS", FileType::BUFKIT, 6);
-        let nam = SoundingType::new_model("NAM", FileType::BUFKIT, 6);
+        let site = arch.site_info("kmso")?;
+        let gfs = arch.sounding_type_from_str("GFS")?;
+        let nam = arch.sounding_type_from_str("NAM")?;
 
         let first = NaiveDate::from_ymd(2017, 4, 1).and_hms(0, 0, 0);
         let last = NaiveDate::from_ymd(2017, 4, 1).and_hms(18, 0, 0);
 
-        let expected = Inventory::new(site.clone())
-            .add_update_range(gfs.clone(), (first, last))
-            .add_update_range(nam.clone(), (first, last))
-            .add_missing_range(
-                nam.clone(),
-                (
-                    NaiveDate::from_ymd(2017, 4, 1).and_hms(6, 0, 0),
-                    NaiveDate::from_ymd(2017, 4, 1).and_hms(6, 0, 0),
-                ),
-            )
-            .add_location(gfs, Location::new(46.92, -114.08, 972, None))
-            .add_location(nam.clone(), Location::new(46.87, -114.16, 1335, None));
-        assert_eq!(arch.inventory(&site, &nam).unwrap(), expected);
+        let inv = arch.inventory(&site)?;
+
+        assert_eq!(inv.range(&gfs).unwrap(), (first, last));
+        assert_eq!(inv.range(&nam).unwrap(), (first, last));
+
+        let gfs_locations = dbg!(inv.locations(&gfs));
+        assert_eq!(gfs_locations.len(), 1);
+        assert_eq!(gfs_locations[0].latitude(), 46.92);
+        assert_eq!(gfs_locations[0].longitude(), -114.08);
+        assert_eq!(gfs_locations[0].elevation(), 972);
+        assert!(gfs_locations[0].is_known());
+
+        let nam_locations = inv.locations(&nam);
+        assert_eq!(nam_locations.len(), 1);
+        assert_eq!(nam_locations[0].latitude(), 46.87);
+        assert_eq!(nam_locations[0].longitude(), -114.16);
+        assert_eq!(nam_locations[0].elevation(), 1335);
+        assert!(nam_locations[0].is_known());
+
+        Ok(())
     }
 
     #[test]
