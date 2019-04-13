@@ -146,10 +146,9 @@ impl Archive {
     // ---------------------------------------------------------------------------------------------
     // Query or modify site metadata
     // ---------------------------------------------------------------------------------------------
-    pub fn short_name_to_site(&self, short_name: &str) -> Result<Site, BufkitDataErr> {
-        crate::site::retrieve_site(&self.db_conn, short_name)
-    }
 
+    /// Get the sounding type object for this string. The string is the same as the one returned by
+    /// the `source()` method of a `SoundingType` object.
     pub fn sounding_type_from_str(
         &self,
         sounding_type: &str,
@@ -916,7 +915,7 @@ mod unit {
 
         fill_test_archive(&mut arch).expect("Error filling test archive.");
 
-        let kmso = arch.short_name_to_site("kmso").unwrap();
+        let kmso = arch.site_info("kmso").unwrap();
         let snd_type = arch.sounding_type_from_str("GFS").unwrap();
 
         println!("Checking for files that should exist.");
@@ -990,7 +989,7 @@ mod unit {
         fill_test_archive(&mut arch).expect("Error filling test archive.");
 
         let init_time = NaiveDate::from_ymd(2017, 4, 1).and_hms(0, 0, 0);
-        let kmso = arch.short_name_to_site("kmso").unwrap();
+        let kmso = arch.site_info("kmso").unwrap();
         let snd_type = arch.sounding_type_from_str("GFS").unwrap();
 
         assert!(arch

@@ -60,7 +60,7 @@ impl Site {
         }
     }
 
-    /// Add a state/providence association to a site
+    /// Add a state/providence association to a site.
     #[inline]
     pub fn with_state_prov<T>(self, state: T) -> Self
     where
@@ -84,31 +84,31 @@ impl Site {
         &self.short_name
     }
 
-    /// Get the long name for this site
+    /// Get the long name for this site.
     #[inline]
     pub fn long_name(&self) -> Option<&str> {
         self.long_name.as_ref().map(|val| val.as_ref())
     }
 
-    /// Get the notes for this site
+    /// Get the notes for this site.
     #[inline]
     pub fn notes(&self) -> Option<&str> {
         self.notes.as_ref().map(|val| val.as_ref())
     }
 
-    /// Get the state/providence for this site
+    /// Get the state/providence for this site.
     #[inline]
     pub fn state_prov(&self) -> Option<StateProv> {
         self.state
     }
 
-    /// Get whether or not this is a mobile site
+    /// Get whether or not this is a mobile site.
     #[inline]
     pub fn is_mobile(&self) -> bool {
         self.is_mobile
     }
 
-    /// Get whether or not the site has been inserted into the database.
+    /// Get whether or not the site has been verified as being in the database.
     #[inline]
     pub fn is_known(&self) -> bool {
         self.id > 0 // sqlite starts at row id = 1
@@ -125,6 +125,7 @@ impl Site {
         self.long_name.is_none() || self.state.is_none()
     }
 }
+
 /// Retrieve the sounding type information from the database for the given source name.
 #[inline]
 pub(crate) fn retrieve_site(db: &Connection, short_name: &str) -> Result<Site, BufkitDataErr> {

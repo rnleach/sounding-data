@@ -4,6 +4,11 @@ use std::str::FromStr;
 use strum::AsStaticRef;
 use strum_macros::{AsStaticStr, EnumString};
 
+/// Stores information about the type of this sounding, including a unique source name.
+///
+/// This is used to keep track of the data source, such as "GFS", "NAM", "NamNest", "NOAA Archived".
+/// It also includes information about whether this is a model or observed sounding type, and the
+/// expected hours between initializations (models) or launches (observed).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SoundingType {
     observed: bool, // False if it is a model generated sounding
@@ -14,6 +19,7 @@ pub struct SoundingType {
 }
 
 impl SoundingType {
+    /// Create a new sounding type.
     pub fn new<T>(src: &str, observed: bool, file_type: FileType, hours_between: T) -> Self
     where
         Option<u16>: From<T>,
@@ -27,6 +33,7 @@ impl SoundingType {
         }
     }
 
+    /// Create a new sounding type that assumes a model.
     #[inline]
     pub fn new_model<T>(src: &str, file_type: FileType, hours_between: T) -> Self
     where
@@ -35,6 +42,7 @@ impl SoundingType {
         Self::new(src, false, file_type, hours_between)
     }
 
+    /// Create a new sounding type that assumes it is observed.
     #[inline]
     pub fn new_observed<T>(src: &str, file_type: FileType, hours_between: T) -> Self
     where
@@ -43,31 +51,38 @@ impl SoundingType {
         Self::new(src, true, file_type, hours_between)
     }
 
+    /// `true` if this type represents a model sounding.
     #[inline]
     pub fn is_modeled(&self) -> bool {
         !self.observed
     }
 
+    /// `true` if this type represents an observed sounding.
     #[inline]
     pub fn is_observed(&self) -> bool {
         self.observed
     }
 
+    /// `true` if this type has been verified to be in the archive index.
     #[inline]
     pub fn is_known(&self) -> bool {
         self.id > -0
     }
 
+    /// Get the unique string that represents the sounding source such as "GFS", "NAM", etc.
     #[inline]
     pub fn source(&self) -> &str {
         &self.source
     }
 
+    /// Hours between model initialization for models and between launches for observed soundings.
     #[inline]
     pub fn hours_between_initializations(&self) -> Option<u16> {
         self.hours_between
     }
 
+    /// This is the file type that the decompressed data is stored in.
+    // FIXME: factor this out to its own module and store it in the database on its own.
     #[inline]
     pub fn file_type(&self) -> FileType {
         self.file_type

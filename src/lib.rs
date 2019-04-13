@@ -1,4 +1,5 @@
-//#![deny(missing_docs)]
+//!
+#![deny(missing_docs)]
 //
 // Public API
 //

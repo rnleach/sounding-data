@@ -92,12 +92,12 @@ impl Location {
         self.elevation_m
     }
 
-    /// Get the time zone offset from UTC in seconds
+    /// Get the time zone offset from UTC in seconds.
     pub fn tz_offset(&self) -> Option<i32> {
         self.tz_offset
     }
 
-    /// Determine if this location has a valid id number
+    /// Determine if this location has been verified as being in the archive index.
     pub fn is_known(&self) -> bool {
         self.id > 0
     }
@@ -190,7 +190,7 @@ pub(crate) fn insert_or_update_location(
 //     )?
 // }
 
-/// Retrieve all the different location associated with a given `Site` and `SoundingType`
+/// Retrieve all the different location associated with a given `Site` and `SoundingType`.
 #[inline]
 pub(crate) fn retrieve_locations_for_site_and_type(
     db: &Connection,

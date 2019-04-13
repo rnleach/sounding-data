@@ -21,14 +21,24 @@ pub struct Inventory {
 }
 
 impl Inventory {
-    /// Get the range of dates we have data for.
+    /// The with which this inventory is associated.
+    pub fn site(&self) -> &Site {
+        &self.site
+    }
+
+    /// The `SoundingType`s in this inventory.
+    pub fn sounding_types(&self) -> impl Iterator<Item = &SoundingType> {
+        self.sounding_types.iter()
+    }
+
+    /// The inclusive range of the initialization times of the soundings.
     pub fn range(&self, sounding_type: &SoundingType) -> Option<(NaiveDateTime, NaiveDateTime)> {
         self.range
             .get(sounding_type)
             .map(|&(start, finish)| (start, finish))
     }
 
-    /// Get the ranges of dates for which we are missing data.
+    /// Get the inclusive ranges of dates for which we are missing data.
     pub fn missing(&self, sounding_type: &SoundingType) -> &[(NaiveDateTime, NaiveDateTime)] {
         self.missing
             .get(sounding_type)
