@@ -1,27 +1,31 @@
-//! An archive of bufkit soundings.
+//! An archive of soundings in various formats.
 
-use chrono::{FixedOffset, NaiveDate, NaiveDateTime};
+use crate::{
+    errors::BufkitDataErr,
+    inventory::Inventory,
+    location::{insert_or_update_location, Location},
+    site::{insert_or_update_site, Site},
+    sounding_type::{insert_or_update_sounding_type, FileType, SoundingType},
+};
+use chrono::NaiveDateTime;
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
-use rusqlite::{types::ToSql, Connection, OpenFlags, Row, NO_PARAMS};
-use std::collections::HashSet;
-use std::fs::{create_dir, create_dir_all, read_dir, remove_file, File};
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
-use std::sync::mpsc::{channel, Receiver};
-use std::thread::{self, JoinHandle};
+use rusqlite::{types::ToSql, Connection, OpenFlags, NO_PARAMS};
+use sounding_analysis::Analysis;
+use sounding_bufkit::BufkitData;
+use std::{
+    collections::HashSet,
+    fs::{create_dir, create_dir_all, read_dir, remove_file, File},
+    io::Read,
+    path::{Path, PathBuf},
+    str::from_utf8,
+};
 use strum::AsStaticRef;
-
-use crate::errors::BufkitDataErr;
-use crate::inventory::Inventory;
-use crate::models::Model;
-use crate::site::{Site, StateProv};
 
 /// The archive.
 #[derive(Debug)]
 pub struct Archive {
     root: PathBuf,       // The root directory.
-    data_root: PathBuf,  // the directory containing the downloaded files.
+    file_dir: PathBuf,   // the directory containing the downloaded files.
     db_conn: Connection, // An sqlite connection.
 }
 
@@ -35,12 +39,12 @@ impl Archive {
     where
         T: AsRef<Path>,
     {
-        let data_root = root.as_ref().join(Archive::DATA_DIR);
-        let db_file = root.as_ref().join(Archive::DB_FILE);
+        let file_dir = root.as_ref().join(Archive::FILE_DIR);
+        let db_file = root.as_ref().join(Archive::INDEX);
         let root = root.as_ref().to_path_buf();
 
         create_dir_all(&root)?;
-        create_dir(&data_root)?; // The folder to store the sounding files.
+        create_dir(&file_dir)?;
 
         // Create and set up the archive
         let db_conn = Connection::open_with_flags(
@@ -48,32 +52,11 @@ impl Archive {
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
         )?;
 
-        db_conn.execute(
-            "CREATE TABLE files (
-                site      TEXT NOT NULL,
-                model     TEXT NOT NULL,
-                init_time TEXT NOT NULL,
-                file_name TEXT NOT NULL,
-                PRIMARY KEY (site, model, init_time)
-            )",
-            NO_PARAMS,
-        )?;
-
-        db_conn.execute(
-            "CREATE TABLE sites (
-                site          TEXT PRIMARY KEY,
-                state         TEXT DEFAULT NULL,
-                name          TEXT DEFAULT NULL,
-                notes         TEXT DEFAULT NULL,
-                auto_download INT DEFAULT 0,
-                tz_offset_sec INT DEFAULT NULL
-            )",
-            NO_PARAMS,
-        )?;
+        db_conn.execute_batch(include_str!("create_index.sql"))?;
 
         Ok(Archive {
             root,
-            data_root,
+            file_dir,
             db_conn,
         })
     }
@@ -83,8 +66,8 @@ impl Archive {
     where
         T: AsRef<Path>,
     {
-        let data_root = root.as_ref().join(Archive::DATA_DIR);
-        let db_file = root.as_ref().join(Archive::DB_FILE);
+        let file_dir = root.as_ref().join(Archive::FILE_DIR);
+        let db_file = root.as_ref().join(Archive::INDEX);
         let root = root.as_ref().to_path_buf();
 
         // Create and set up the archive
@@ -92,198 +75,95 @@ impl Archive {
 
         Ok(Archive {
             root,
-            data_root,
+            file_dir,
             db_conn,
         })
     }
 
-    /// Validate files listed in the index are in the archive too, if not remove them from the
-    /// index.
+    /// Check for errors in the index.
     ///
-    pub fn clean(
-        &self,
-    ) -> Result<(JoinHandle<Result<(), BufkitDataErr>>, Receiver<String>), BufkitDataErr> {
-        let (sender, receiver) = channel::<String>();
-        let root = self.root.clone();
+    /// Return a list of files in the index that are missing on the system and a list of files on
+    /// the system that are not in the index.
+    ///
+    /// The first set returned in the tuple is the files in the index but not the file system. The
+    /// second set returned in the tuple is the files on the system but not in the index.
+    pub fn check(&self) -> Result<(Vec<String>, Vec<String>), BufkitDataErr> {
+        self.db_conn.execute("PRAGMA cache_size=10000", NO_PARAMS)?;
 
-        let jh = thread::spawn(move || -> Result<(), BufkitDataErr> {
-            let arch = Archive::connect(root)?;
+        let mut all_files_stmt = self.db_conn.prepare("SELECT file_name FROM files")?;
 
-            arch.db_conn.execute("PRAGMA cache_size=10000", NO_PARAMS)?;
+        let index_vals: Result<HashSet<String>, BufkitDataErr> = all_files_stmt
+            .query_map(NO_PARAMS, |row| -> String { row.get(0) })?
+            .map(|res| res.map_err(BufkitDataErr::Database))
+            .map(|res| res.map(String::from))
+            .collect();
+        let index_vals = index_vals?;
 
-            arch.db_conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS fname ON files (file_name)",
-                NO_PARAMS,
-            )?;
+        let file_system_vals: HashSet<String> = read_dir(&self.file_dir)?
+            .filter_map(|de| de.ok())
+            .map(|de| de.path())
+            .filter(|p| p.is_file())
+            .filter_map(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
+            .collect();
 
-            let mut del_stmt = arch
-                .db_conn
-                .prepare("DELETE FROM files WHERE file_name = ?1")?;
-            let mut insert_stmt = arch.db_conn.prepare(
-                "INSERT INTO files (site, model, init_time, file_name) VALUES (?1, ?2, ?3, ?4)",
-            )?;
-            let mut all_files_stmt = arch.db_conn.prepare("SELECT file_name FROM files")?;
+        let files_in_index_but_not_on_file_system: Vec<String> = index_vals
+            .difference(&file_system_vals)
+            .map(|s| s.to_owned())
+            .collect();
+        let files_not_in_index: Vec<String> = file_system_vals
+            .difference(&index_vals)
+            .map(|s| s.to_owned())
+            .collect();
 
-            sender
-                .send("Building set of files from the index.".to_string())
-                .map_err(BufkitDataErr::SenderError)?;
-
-            let index_vals: Result<HashSet<String>, BufkitDataErr> = all_files_stmt
-                .query_map(NO_PARAMS, |row| -> String { row.get(0) })?
-                .map(|res| res.map_err(BufkitDataErr::Database))
-                .collect();
-            let index_vals = index_vals?;
-
-            sender
-                .send("Building set of files from the file system.".to_string())
-                .map_err(BufkitDataErr::SenderError)?;
-
-            let file_system_vals: HashSet<String> = read_dir(&arch.data_root)?
-                .filter_map(|de| de.ok())
-                .map(|de| de.path())
-                .filter(|p| p.is_file())
-                .filter_map(|p| p.file_name().map(|p| p.to_owned()))
-                .map(|p| p.to_string_lossy().to_string())
-                .collect();
-
-            sender
-                .send("Comparing sets for files in index but not in the archive.".to_string())
-                .map_err(BufkitDataErr::SenderError)?;
-            let files_in_index_but_not_on_file_system = index_vals.difference(&file_system_vals);
-
-            arch.db_conn.execute("BEGIN TRANSACTION", NO_PARAMS)?;
-            for missing_file in files_in_index_but_not_on_file_system {
-                del_stmt.execute(&[missing_file])?;
-                sender
-                    .send(format!("Removing {} from index.", missing_file))
-                    .map_err(BufkitDataErr::SenderError)?;
-            }
-            arch.db_conn.execute("COMMIT TRANSACTION", NO_PARAMS)?;
-
-            sender
-                .send("Comparing sets for files in archive but not in the index.".to_string())
-                .map_err(BufkitDataErr::SenderError)?;
-            let files_not_in_index = file_system_vals.difference(&index_vals);
-
-            arch.db_conn.execute("BEGIN TRANSACTION", NO_PARAMS)?;
-            for extra_file in files_not_in_index {
-                let message = if let Some((init_time, model, site)) =
-                    Self::parse_compressed_file_name(&extra_file)
-                {
-                    if !arch.site_exists(&site)? {
-                        arch.add_site(&Site {
-                            id: site.clone(),
-                            state: None,
-                            name: None,
-                            notes: None,
-                            auto_download: false,
-                            time_zone: None,
-                        })?;
-                    }
-                    match insert_stmt.execute(&[
-                        &site.to_uppercase() as &ToSql,
-                        &model.as_static() as &ToSql,
-                        &init_time as &ToSql,
-                        &extra_file,
-                    ]) {
-                        Ok(_) => format!("Added {}", extra_file),
-                        Err(_) => {
-                            remove_file(arch.data_root.join(extra_file))?;
-                            format!("Duplicate file removed: {}", extra_file)
-                        }
-                    }
-                } else {
-                    // Remove non-bufkit file
-                    remove_file(arch.data_root.join(extra_file))?;
-                    format!("Removed non-bufkit file: {}", extra_file)
-                };
-
-                sender.send(message).map_err(BufkitDataErr::SenderError)?;
-            }
-            arch.db_conn.execute("COMMIT TRANSACTION", NO_PARAMS)?;
-
-            sender
-                .send("Compressing index.".to_string())
-                .map_err(BufkitDataErr::SenderError)?;
-            arch.db_conn.execute("VACUUM", NO_PARAMS)?;
-
-            Ok(())
-        });
-
-        Ok((jh, receiver))
+        Ok((files_in_index_but_not_on_file_system, files_not_in_index))
     }
+
+    // /// Given a list of files, remove them from the index, but NOT the file system.
+    // fn remove_from_index(&self, file_names: &[String]) -> Result<(), BufkitDataErr> {
+    //     // TODO: implement
+    //     unimplemented!()
+    // }
+
+    // /// Given a list of files, remove them from the file system. This assumes they have already been
+    // /// removed from the index (or never existed there.)
+    // fn remove_from_data_store(&self, file_names: &[String]) -> Result<(), BufkitDataErr> {
+    //     // TODO: implement
+    //     unimplemented!()
+    // }
+
+    // /// Given a list of files, attempt to parse the file names and add them to the index.
+    // fn add_to_index(&self, file_names: &[String]) -> Result<(), BufkitDataErr> {
+    //     // TODO: implement
+    //     unimplemented!()
+    // }
 
     // ---------------------------------------------------------------------------------------------
     // The file system aspects of the archive, e.g. the root directory of the archive
     // ---------------------------------------------------------------------------------------------
-    const DATA_DIR: &'static str = "data";
-    const DB_FILE: &'static str = "index.db";
-
-    /// Retrieve a path to the root. Allows caller to store files in the archive.
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
+    const FILE_DIR: &'static str = "files";
+    const INDEX: &'static str = "index.sqlite";
 
     // ---------------------------------------------------------------------------------------------
     // Query or modify site metadata
     // ---------------------------------------------------------------------------------------------
 
-    fn parse_row_to_site(row: &Row) -> Result<Site, rusqlite::Error> {
-        let id = row.get_checked(0)?;
-        let name = row.get_checked(1)?;
-        let notes = row.get_checked(3)?;
-        let auto_download = row.get_checked(4)?;
-        let state: Option<StateProv> = row
-            .get_checked::<_, String>(2)
-            .ok()
-            .and_then(|a_string| StateProv::from_str(&a_string).ok());
-
-        let time_zone: Option<FixedOffset> =
-            row.get_checked::<_, i32>(5).ok().map(|offset: i32| {
-                if offset < 0 {
-                    FixedOffset::west(offset.abs())
-                } else {
-                    FixedOffset::east(offset)
-                }
-            });
-
-        Ok(Site {
-            id,
-            name,
-            notes,
-            state,
-            auto_download,
-            time_zone,
-        })
+    /// Get the sounding type object for this string. The string is the same as the one returned by
+    /// the `source()` method of a `SoundingType` object.
+    pub fn sounding_type_from_str(
+        &self,
+        sounding_type: &str,
+    ) -> Result<SoundingType, BufkitDataErr> {
+        crate::sounding_type::retrieve_sounding_type(&self.db_conn, sounding_type)
     }
 
     /// Retrieve a list of sites in the archive.
     pub fn sites(&self) -> Result<Vec<Site>, BufkitDataErr> {
-        let mut stmt = self
-            .db_conn
-            .prepare("SELECT site,name,state,notes,auto_download,tz_offset_sec FROM sites")?;
-
-        let vals: Result<Vec<Site>, BufkitDataErr> = stmt
-            .query_and_then(NO_PARAMS, Self::parse_row_to_site)?
-            .map(|res| res.map_err(BufkitDataErr::Database))
-            .collect();
-
-        vals
+        crate::site::all_sites(&self.db_conn)
     }
 
     /// Retrieve the information about a single site.
-    pub fn site_info(&self, site_id: &str) -> Result<Site, BufkitDataErr> {
-        self.db_conn
-            .query_row_and_then(
-                "
-                SELECT site,name,state,notes,auto_download,tz_offset_sec
-                FROM sites
-                WHERE site = ?1
-            ",
-                &[&site_id.to_uppercase()],
-                Self::parse_row_to_site,
-            )
-            .map_err(BufkitDataErr::Database)
+    pub fn site_info(&self, short_name: &str) -> Result<Site, BufkitDataErr> {
+        crate::site::retrieve_site(&self.db_conn, short_name)
     }
 
     /// Modify a sites values.
@@ -291,17 +171,16 @@ impl Archive {
         self.db_conn.execute(
             "
                 UPDATE sites 
-                SET (state,name,notes,auto_download,tz_offset_sec)
-                = (?2, ?3, ?4, ?5, ?6)
-                WHERE site = ?1
+                SET (long_name, state, notes, mobile_sounding_site)
+                = (?2, ?3, ?4, ?5)
+                WHERE short_name = ?1
             ",
             &[
-                &site.id.to_uppercase(),
-                &site.state.map(|state_prov| state_prov.as_static()) as &ToSql,
-                &site.name,
-                &site.notes,
-                &site.auto_download,
-                &site.time_zone.map(|tz| tz.local_minus_utc()),
+                &site.short_name() as &ToSql,
+                &site.long_name() as &ToSql,
+                &site.state_prov().map(|state_prov| state_prov.as_static()) as &ToSql,
+                &site.notes() as &ToSql,
+                &site.is_mobile(),
             ],
         )?;
 
@@ -311,15 +190,14 @@ impl Archive {
     /// Add a site to the list of sites.
     pub fn add_site(&self, site: &Site) -> Result<(), BufkitDataErr> {
         self.db_conn.execute(
-            "INSERT INTO sites (site, state, name, notes, auto_download, tz_offset_sec)
-                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO sites (short_name, long_name, state, notes, mobile_sounding_site)
+                  VALUES (?1, ?2, ?3, ?4, ?5)",
             &[
-                &site.id.to_uppercase(),
-                &site.state.map(|state_prov| state_prov.as_static()) as &ToSql,
-                &site.name,
-                &site.notes,
-                &site.auto_download,
-                &site.time_zone.map(|tz| tz.local_minus_utc()),
+                &site.short_name() as &ToSql,
+                &site.long_name() as &ToSql,
+                &site.state_prov().map(|state_prov| state_prov.as_static()) as &ToSql,
+                &site.notes() as &ToSql,
+                &site.is_mobile(),
             ],
         )?;
 
@@ -327,101 +205,49 @@ impl Archive {
     }
 
     /// Check if a site already exists
-    pub fn site_exists(&self, site_id: &str) -> Result<bool, BufkitDataErr> {
+    pub fn site_exists(&self, short_name: &str) -> Result<bool, BufkitDataErr> {
         let number: i32 = self.db_conn.query_row(
-            "SELECT COUNT(*) FROM sites WHERE site = ?1",
-            &[&site_id.to_uppercase()],
+            "SELECT COUNT(*) FROM sites WHERE short_name = ?1",
+            &[short_name],
             |row| row.get(0),
         )?;
 
-        Ok(number == 1)
+        Ok(number >= 1)
     }
 
     // ---------------------------------------------------------------------------------------------
     // Query archive inventory
     // ---------------------------------------------------------------------------------------------
 
-    /// Get a list of all the available model initialization times for a given site and model.
-    pub fn init_times(
-        &self,
-        site_id: &str,
-        model: Model,
-    ) -> Result<Vec<NaiveDateTime>, BufkitDataErr> {
-        let mut stmt = self.db_conn.prepare(
-            "
-                SELECT init_time FROM files 
-                WHERE site = ?1 AND model = ?2
-                ORDER BY init_time ASC
-            ",
-        )?;
-
-        let init_times: Result<Vec<Result<NaiveDateTime, _>>, BufkitDataErr> = stmt
-            .query_map(&[&site_id.to_uppercase(), model.as_static()], |row| {
-                row.get_checked(0)
-            })?
-            .map(|res| res.map_err(BufkitDataErr::Database))
-            .collect();
-
-        let init_times: Vec<NaiveDateTime> =
-            init_times?.into_iter().filter_map(|res| res.ok()).collect();
-
-        Ok(init_times)
-    }
-
-    /// Get the number of values files in the archive for the model and intitialization time.
-    pub fn count_init_times(&self, site_id: &str, model: Model) -> Result<i64, BufkitDataErr> {
-        let num_records: i64 = self.db_conn.query_row(
-            "
-                SELECT COUNT(init_time) FROM files 
-                WHERE site = ?1 AND model = ?2
-            ",
-            &[&site_id.to_uppercase(), model.as_static()],
-            |row| row.get_checked(0),
-        )??;
-
-        Ok(num_records)
-    }
-
     /// Get an inventory of soundings for a site & model.
-    pub fn inventory(&self, site_id: &str, model: Model) -> Result<Inventory, BufkitDataErr> {
-        let init_times = self.init_times(site_id, model)?;
-
-        let site = &self.site_info(site_id)?;
-
-        Inventory::new(init_times, model, site)
+    pub fn inventory(&self, site: &Site) -> Result<Inventory, BufkitDataErr> {
+        debug_assert!(site.id() > 0);
+        crate::inventory::inventory(&self.db_conn, site.clone())
     }
 
     /// Get a list of models in the archive for this site.
-    pub fn models(&self, site_id: &str) -> Result<Vec<Model>, BufkitDataErr> {
-        let mut stmt = self
-            .db_conn
-            .prepare("SELECT DISTINCT model FROM files WHERE site = ?1")?;
-
-        let vals: Result<Vec<Model>, BufkitDataErr> = stmt
-            .query_map(&[&site_id.to_uppercase()], |row| {
-                let model: String = row.get(0);
-                Model::from_str(&model).map_err(|_err| BufkitDataErr::InvalidModelName(model))
-            })?
-            .flat_map(|res| res.map_err(BufkitDataErr::Database).into_iter())
-            .collect();
-
-        vals
+    pub fn sounding_types(&self, site: &Site) -> Result<Vec<SoundingType>, BufkitDataErr> {
+        debug_assert!(site.id() > 0);
+        crate::sounding_type::all_sounding_types_for_site(&self.db_conn, site)
     }
 
     /// Retrieve the model initialization time of the most recent model in the archive.
     pub fn most_recent_valid_time(
         &self,
-        site_id: &str,
-        model: Model,
+        site: &Site,
+        sounding_type: &SoundingType,
     ) -> Result<NaiveDateTime, BufkitDataErr> {
+        debug_assert!(site.id() > 0);
+        debug_assert!(sounding_type.id() > 0);
+
         let init_time: NaiveDateTime = self.db_conn.query_row(
             "
-                SELECT init_time FROM files 
-                WHERE site = ?1 AND model = ?2
+                SELECT init_time FROM files
+                WHERE site_id = ?1 AND type_id = ?2
                 ORDER BY init_time DESC
                 LIMIT 1
             ",
-            &[&site_id.to_uppercase(), model.as_static()],
+            &[&site.id(), &sounding_type.id()],
             |row| row.get_checked(0),
         )??;
 
@@ -431,17 +257,16 @@ impl Archive {
     /// Check to see if a file is present in the archive and it is retrieveable.
     pub fn file_exists(
         &self,
-        site_id: &str,
-        model: Model,
+        site: &Site,
+        sounding_type: &SoundingType,
         init_time: &NaiveDateTime,
     ) -> Result<bool, BufkitDataErr> {
+        debug_assert!(site.id() > 0);
+        debug_assert!(sounding_type.id() > 0);
+
         let num_records: i32 = self.db_conn.query_row(
-            "SELECT COUNT(*) FROM files WHERE site = ?1 AND model = ?2 AND init_time = ?3",
-            &[
-                &site_id.to_uppercase() as &ToSql,
-                &model.as_static() as &ToSql,
-                init_time as &ToSql,
-            ],
+            "SELECT COUNT(*) FROM files WHERE site_id = ?1 AND type_id = ?2 AND init_time = ?3",
+            &[&site.id(), &sounding_type.id(), init_time as &ToSql],
             |row| row.get_checked(0),
         )??;
 
@@ -463,152 +288,224 @@ impl Archive {
     // Add, remove, and retrieve files from the archive
     // ---------------------------------------------------------------------------------------------
 
-    /// Add a bufkit file to the archive.
+    /// Add a file to the archive.
     pub fn add(
         &self,
-        site_id: &str,
-        model: Model,
+        site: Site,
+        sounding_type: SoundingType,
+        location: Location,
         init_time: &NaiveDateTime,
-        text_data: &str,
+        file_name: &str,
     ) -> Result<(), BufkitDataErr> {
-        if !self.site_exists(site_id)? {
-            self.add_site(&Site {
-                id: site_id.to_owned(),
-                name: None,
-                notes: None,
-                state: None,
-                auto_download: false,
-                time_zone: None,
-            })?;
-        }
+        let site = if site.is_known() {
+            site
+        } else {
+            self.update_or_insert_site(site)?
+        };
 
-        let file_name = self.compressed_file_name(site_id, model, init_time);
-        let file = File::create(self.data_root.join(&file_name))?;
-        let mut encoder = GzEncoder::new(file, Compression::default());
-        encoder.write_all(text_data.as_bytes())?;
+        let sounding_type = if sounding_type.is_known() {
+            sounding_type
+        } else {
+            self.update_or_insert_sounding_type(sounding_type)?
+        };
+
+        let fname: String = self.compressed_file_name(&site, &sounding_type, init_time);
+
+        let sounding_type = if sounding_type.is_known() {
+            sounding_type
+        } else {
+            insert_or_update_sounding_type(&self.db_conn, sounding_type)?
+        };
+
+        let site = if site.is_known() {
+            site
+        } else {
+            insert_or_update_site(&self.db_conn, site)?
+        };
+
+        let location = if location.is_known() {
+            location
+        } else {
+            insert_or_update_location(&self.db_conn, location)?
+        };
+
+        let mut in_file = File::open(file_name)?;
+        let out_file = File::create(self.file_dir.join(&fname))?;
+        let mut encoder = GzEncoder::new(out_file, Compression::default());
+        std::io::copy(&mut in_file, &mut encoder)?;
 
         self.db_conn.execute(
-            "INSERT OR REPLACE INTO files (site, model, init_time, file_name)
-                  VALUES (?1, ?2, ?3, ?4)",
+            "
+                INSERT OR REPLACE INTO files (type_id, site_id, location_id, init_time, file_name)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+            ",
             &[
-                &site_id.to_uppercase() as &ToSql,
-                &model.as_static() as &ToSql,
-                init_time as &ToSql,
-                &file_name,
+                &sounding_type.id(),
+                &site.id(),
+                &location.id(),
+                &init_time as &ToSql,
+                &fname,
             ],
         )?;
 
+        // Open the file in binary mode and compress it into a file with the above found name
+
         Ok(())
+    }
+
+    /// Insert or update a sounding type.
+    pub fn update_or_insert_sounding_type(
+        &self,
+        sounding_type: SoundingType,
+    ) -> Result<SoundingType, BufkitDataErr> {
+        crate::sounding_type::insert_or_update_sounding_type(&self.db_conn, sounding_type)
+    }
+
+    /// Insert or update a site.
+    pub fn update_or_insert_site(&self, site: Site) -> Result<Site, BufkitDataErr> {
+        crate::site::insert_or_update_site(&self.db_conn, site)
+    }
+
+    fn get_file_name_for(
+        &self,
+        site: &Site,
+        sounding_type: &SoundingType,
+        init_time: &NaiveDateTime,
+    ) -> Result<String, BufkitDataErr> {
+        debug_assert!(site.id() > 0, "Site not checked or added in index");
+        debug_assert!(
+            sounding_type.id() > 0,
+            "Sounding type not checked or added in index."
+        );
+
+        let file_name: String = self.db_conn.query_row(
+            "SELECT file_name FROM files WHERE site_id = ?1 AND type_id = ?2 AND init_time = ?3",
+            &[&site.id(), &sounding_type.id(), init_time as &ToSql],
+            |row| row.get_checked(0),
+        )??;
+
+        Ok(file_name)
+    }
+
+    fn load_data(&self, file_name: &str) -> Result<Vec<u8>, BufkitDataErr> {
+        let file = File::open(self.file_dir.join(file_name))?;
+        let mut decoder = GzDecoder::new(file);
+        let mut buf: Vec<u8> = vec![];
+        let _bytes_read = decoder.read_to_end(&mut buf)?;
+
+        Ok(buf)
+    }
+
+    fn decode_data(
+        buf: &[u8],
+        description: &str,
+        ftype: FileType,
+    ) -> Result<Vec<Analysis>, BufkitDataErr> {
+        match ftype {
+            FileType::BUFKIT => {
+                let bufkit_str = from_utf8(&buf)?;
+                let bufkit_data = BufkitData::init(bufkit_str, description)?;
+                let bufkit_anals: Vec<Analysis> = bufkit_data.into_iter().collect();
+                Ok(bufkit_anals)
+            }
+            FileType::BUFR => unimplemented!(),
+        }
     }
 
     /// Retrieve a file from the archive.
     pub fn retrieve(
         &self,
-        site_id: &str,
-        model: Model,
+        site: &Site,
+        sounding_type: &SoundingType,
         init_time: &NaiveDateTime,
-    ) -> Result<String, BufkitDataErr> {
-        let file_name: String = self.db_conn.query_row(
-            "SELECT file_name FROM files WHERE site = ?1 AND model = ?2 AND init_time = ?3",
-            &[
-                &site_id.to_uppercase() as &ToSql,
-                &model.as_static() as &ToSql,
-                init_time as &ToSql,
-            ],
-            |row| row.get_checked(0),
-        )??;
-
-        let file = File::open(self.data_root.join(file_name))?;
-        let mut decoder = GzDecoder::new(file);
-        let mut s = String::new();
-        decoder.read_to_string(&mut s)?;
-        Ok(s)
+    ) -> Result<Vec<Analysis>, BufkitDataErr> {
+        let file_name = self.get_file_name_for(site, sounding_type, init_time)?;
+        let data = self.load_data(&file_name)?;
+        Self::decode_data(&data, &file_name, sounding_type.file_type())
     }
 
-    /// Retrieve the  most recent file
-    pub fn most_recent_file(&self, site_id: &str, model: Model) -> Result<String, BufkitDataErr> {
-        let init_time = self.most_recent_valid_time(site_id, model)?;
-        self.retrieve(site_id, model, &init_time)
+    /// Retrieve and uncompress a file.
+    pub fn export(
+        &self,
+        site: &Site,
+        sounding_type: &SoundingType,
+        init_time: &NaiveDateTime,
+    ) -> Result<impl Read, BufkitDataErr> {
+        let file_name = self.get_file_name_for(site, sounding_type, init_time)?;
+        let file = File::open(self.file_dir.join(file_name))?;
+        Ok(GzDecoder::new(file))
+    }
+
+    /// Retrieve the  most recent file as a sounding.
+    pub fn most_recent_file(
+        &self,
+        site: &Site,
+        sounding_type: &SoundingType,
+    ) -> Result<Vec<Analysis>, BufkitDataErr> {
+        let init_time = self.most_recent_valid_time(site, sounding_type)?;
+        self.retrieve(site, sounding_type, &init_time)
     }
 
     fn compressed_file_name(
         &self,
-        site_id: &str,
-        model: Model,
+        site: &Site,
+        sounding_type: &SoundingType,
         init_time: &NaiveDateTime,
     ) -> String {
         let file_string = init_time.format("%Y%m%d%HZ").to_string();
 
         format!(
-            "{}_{}_{}.buf.gz",
+            "{}_{}_{}.gz",
             file_string,
-            model.as_static(),
-            site_id.to_uppercase()
+            sounding_type.source(),
+            site.short_name(),
         )
+        .into()
     }
 
-    fn parse_compressed_file_name(fname: &str) -> Option<(NaiveDateTime, Model, String)> {
-        let tokens: Vec<&str> = fname.split(|c| c == '_' || c == '.').collect();
+    // fn parse_compressed_file_name(fname: &str) -> Option<(NaiveDateTime, SoundingType, String)> {
+    //     // let tokens: Vec<&str> = fname.split(|c| c == '_' || c == '.').collect();
 
-        if tokens.len() != 5 {
-            return None;
-        }
+    //     // if tokens.len() != 5 {
+    //     //     return None;
+    //     // }
 
-        let year = tokens[0][0..4].parse::<i32>().ok()?;
-        let month = tokens[0][4..6].parse::<u32>().ok()?;
-        let day = tokens[0][6..8].parse::<u32>().ok()?;
-        let hour = tokens[0][8..10].parse::<u32>().ok()?;
-        let init_time = NaiveDate::from_ymd(year, month, day).and_hms(hour, 0, 0);
+    //     // let year = tokens[0][0..4].parse::<i32>().ok()?;
+    //     // let month = tokens[0][4..6].parse::<u32>().ok()?;
+    //     // let day = tokens[0][6..8].parse::<u32>().ok()?;
+    //     // let hour = tokens[0][8..10].parse::<u32>().ok()?;
+    //     // let init_time = NaiveDate::from_ymd(year, month, day).and_hms(hour, 0, 0);
 
-        let model = Model::from_str(tokens[1]).ok()?;
+    //     // let model = Model::from_str(tokens[1]).ok()?;
 
-        let site = tokens[2].to_owned();
+    //     // let site = tokens[2].to_owned();
 
-        if tokens[3] != "buf" || tokens[4] != "gz" {
-            return None;
-        }
+    //     // if tokens[3] != "buf" || tokens[4] != "gz" {
+    //     //     return None;
+    //     // }
 
-        Some((init_time, model, site))
-    }
-
-    /// Get the file name this would have if uncompressed.
-    pub fn file_name(&self, site_id: &str, model: Model, init_time: &NaiveDateTime) -> String {
-        let file_string = init_time.format("%Y%m%d%HZ").to_string();
-
-        format!(
-            "{}_{}_{}.buf",
-            file_string,
-            model.as_static(),
-            site_id.to_uppercase()
-        )
-    }
+    //     // Some((init_time, model, site))
+    //     unimplemented!()
+    // }
 
     /// Remove a file from the archive.
     pub fn remove(
         &self,
-        site_id: &str,
-        model: Model,
+        site: &Site,
+        sounding_type: &SoundingType,
         init_time: &NaiveDateTime,
     ) -> Result<(), BufkitDataErr> {
         let file_name: String = self.db_conn.query_row(
-            "SELECT file_name FROM files WHERE site = ?1 AND model = ?2 AND init_time = ?3",
-            &[
-                &site_id.to_uppercase() as &ToSql,
-                &model.as_static() as &ToSql,
-                init_time as &ToSql,
-            ],
+            "SELECT file_name FROM files WHERE site_id = ?1 AND type_id = ?2 AND init_time = ?3",
+            &[&site.id(), &sounding_type.id(), init_time as &ToSql],
             |row| row.get_checked(0),
         )??;
 
-        remove_file(self.data_root.join(file_name)).map_err(BufkitDataErr::IO)?;
+        remove_file(self.file_dir.join(file_name)).map_err(BufkitDataErr::Io)?;
 
         self.db_conn.execute(
-            "DELETE FROM files WHERE site = ?1 AND model = ?2 AND init_time = ?3",
-            &[
-                &site_id.to_uppercase() as &ToSql,
-                &model.as_static() as &ToSql,
-                init_time as &ToSql,
-            ],
+            "DELETE FROM files WHERE site_id = ?1 AND type_id = ?2 AND init_time = ?3",
+            &[&site.id(), &sounding_type.id(), init_time as &ToSql],
         )?;
 
         Ok(())
@@ -621,13 +518,12 @@ impl Archive {
 #[cfg(test)]
 mod unit {
     use super::*;
-
-    use std::fs::read_dir;
-
+    use crate::{FileType, Location, StateProv};
     use chrono::NaiveDate;
-    use tempdir::TempDir;
-
+    use metfor::Quantity;
     use sounding_bufkit::BufkitFile;
+    use std::{error::Error, fs::read_dir};
+    use tempdir::TempDir;
 
     // struct to hold temporary data for tests.
     struct TestArchive {
@@ -644,7 +540,8 @@ mod unit {
     }
 
     // Function to fetch a list of test files.
-    fn get_test_data() -> Result<Vec<(String, Model, NaiveDateTime, String)>, BufkitDataErr> {
+    fn get_test_data(
+    ) -> Result<Vec<(Site, SoundingType, NaiveDateTime, Location, String)>, BufkitDataErr> {
         let path = PathBuf::new().join("example_data");
 
         let files = read_dir(path)?
@@ -662,6 +559,9 @@ mod unit {
         let mut to_return = vec![];
 
         for path in files {
+            //
+            // FIXME: handle multiple file types, like BUFR and whatever else types we want to work
+            //
             let bufkit_file = BufkitFile::load(&path)?;
             let anal = bufkit_file
                 .data()?
@@ -671,20 +571,29 @@ mod unit {
             let snd = anal.sounding();
 
             let model = if path.to_string_lossy().to_string().contains("gfs") {
-                Model::GFS
+                SoundingType::new("GFS", false, FileType::BUFKIT, 6)
             } else {
-                Model::NAM
+                SoundingType::new("NAM", false, FileType::BUFKIT, 6)
             };
             let site = if path.to_string_lossy().to_string().contains("kmso") {
-                "kmso"
+                Site::new("kmso")
             } else {
                 panic!("Unprepared for this test data!");
             };
 
             let init_time = snd.valid_time().expect("NO VALID TIME?!");
-            let raw_string = bufkit_file.raw_text();
 
-            to_return.push((site.to_owned(), model, init_time, raw_string.to_owned()))
+            let (lat, lon) = snd.station_info().location().unwrap();
+            let elev_m = snd.station_info().elevation().unwrap().unpack();
+            let loc = Location::new(lat, lon, elev_m as i32, None);
+
+            to_return.push((
+                site.to_owned(),
+                model,
+                init_time,
+                loc,
+                path.to_string_lossy().to_string(),
+            ))
         }
 
         Ok(to_return)
@@ -694,8 +603,8 @@ mod unit {
     fn fill_test_archive(arch: &mut Archive) -> Result<(), BufkitDataErr> {
         let test_data = get_test_data().expect("Error loading test data.");
 
-        for (site, model, init_time, raw_data) in test_data {
-            arch.add(&site, model, &init_time, &raw_data)?;
+        for (site, sounding_type, init_time, loc, fname) in test_data {
+            arch.add(site, sounding_type, loc, &init_time, &fname)?;
         }
         Ok(())
     }
@@ -719,18 +628,6 @@ mod unit {
     }
 
     // ---------------------------------------------------------------------------------------------
-    // The file system aspects of the archive, e.g. the root directory of the archive
-    // ---------------------------------------------------------------------------------------------
-    #[test]
-    fn test_get_root() {
-        let TestArchive { tmp, arch } =
-            create_test_archive().expect("Failed to create test archive.");
-
-        let root = arch.root();
-        assert_eq!(root, tmp.path());
-    }
-
-    // ---------------------------------------------------------------------------------------------
     // Query or modify site metadata
     // ---------------------------------------------------------------------------------------------
     #[test]
@@ -739,30 +636,21 @@ mod unit {
             create_test_archive().expect("Failed to create test archive.");
 
         let test_sites = &[
-            Site {
-                id: "kord".to_uppercase(),
-                name: Some("Chicago/O'Hare".to_owned()),
-                notes: Some("Major air travel hub.".to_owned()),
-                state: Some(StateProv::IL),
-                auto_download: false,
-                time_zone: None,
-            },
-            Site {
-                id: "ksea".to_uppercase(),
-                name: Some("Seattle".to_owned()),
-                notes: Some("A coastal city with coffe and rain".to_owned()),
-                state: Some(StateProv::WA),
-                auto_download: true,
-                time_zone: Some(FixedOffset::west(8 * 3600)),
-            },
-            Site {
-                id: "kmso".to_uppercase(),
-                name: Some("Missoula".to_owned()),
-                notes: Some("In a valley.".to_owned()),
-                state: None,
-                auto_download: true,
-                time_zone: Some(FixedOffset::west(7 * 3600)),
-            },
+            Site::new("kord")
+                .with_long_name("Chicago/O'Hare".to_owned())
+                .with_notes("Major air travel hub.".to_owned())
+                .with_state_prov(StateProv::IL)
+                .set_mobile(false),
+            Site::new("ksea")
+                .with_long_name("Seattle".to_owned())
+                .with_notes("A coastal city with coffee and rain".to_owned())
+                .with_state_prov(StateProv::WA)
+                .set_mobile(false),
+            Site::new("kmso")
+                .with_long_name("Missoula".to_owned())
+                .with_notes("In a valley.".to_owned())
+                .with_state_prov(None)
+                .set_mobile(false),
         ];
 
         for site in test_sites {
@@ -777,7 +665,10 @@ mod unit {
 
         for site in retrieved_sites {
             println!("{:#?}", site);
-            assert!(test_sites.iter().find(|st| **st == site).is_some());
+            assert!(test_sites
+                .iter()
+                .find(|st| st.short_name() == site.short_name())
+                .is_some());
         }
     }
 
@@ -787,37 +678,38 @@ mod unit {
             create_test_archive().expect("Failed to create test archive.");
 
         let test_sites = &[
-            Site {
-                id: "kord".to_uppercase(),
-                name: Some("Chicago/O'Hare".to_owned()),
-                notes: Some("Major air travel hub.".to_owned()),
-                state: Some(StateProv::IL),
-                auto_download: false,
-                time_zone: None,
-            },
-            Site {
-                id: "ksea".to_uppercase(),
-                name: Some("Seattle".to_owned()),
-                notes: Some("A coastal city with coffe and rain".to_owned()),
-                state: Some(StateProv::WA),
-                auto_download: true,
-                time_zone: Some(FixedOffset::west(8 * 3600)),
-            },
-            Site {
-                id: "kmso".to_uppercase(),
-                name: Some("Missoula".to_owned()),
-                notes: Some("In a valley.".to_owned()),
-                state: None,
-                auto_download: true,
-                time_zone: Some(FixedOffset::west(7 * 3600)),
-            },
+            Site::new("kord")
+                .with_long_name("Chicago/O'Hare".to_owned())
+                .with_notes("Major air travel hub.".to_owned())
+                .with_state_prov(StateProv::IL)
+                .set_mobile(false),
+            Site::new("ksea")
+                .with_long_name("Seattle".to_owned())
+                .with_notes("A coastal city with coffe and rain".to_owned())
+                .with_state_prov(StateProv::WA)
+                .set_mobile(false),
+            Site::new("kmso")
+                .with_long_name("Missoula".to_owned())
+                .with_notes("In a valley.".to_owned())
+                .with_state_prov(None)
+                .set_mobile(false),
         ];
 
         for site in test_sites {
             arch.add_site(site).expect("Error adding site.");
         }
 
-        assert_eq!(arch.site_info("ksea").unwrap(), test_sites[1]);
+        for site in test_sites {
+            let retr_site = arch.site_info(site.short_name()).unwrap();
+
+            assert_eq!(site.short_name(), retr_site.short_name());
+            assert_ne!(site.id(), retr_site.id());
+            assert!(site.id() <= 0);
+            assert!(retr_site.id() > 0);
+            assert_eq!(site.long_name(), retr_site.long_name());
+            assert_eq!(site.state_prov(), retr_site.state_prov());
+            assert_eq!(site.notes(), retr_site.notes());
+        }
     }
 
     #[test]
@@ -826,49 +718,51 @@ mod unit {
             create_test_archive().expect("Failed to create test archive.");
 
         let test_sites = &[
-            Site {
-                id: "kord".to_uppercase(),
-                name: Some("Chicago/O'Hare".to_owned()),
-                notes: Some("Major air travel hub.".to_owned()),
-                state: Some(StateProv::IL),
-                auto_download: false,
-                time_zone: None,
-            },
-            Site {
-                id: "ksea".to_uppercase(),
-                name: Some("Seattle".to_owned()),
-                notes: Some("A coastal city with coffe and rain".to_owned()),
-                state: Some(StateProv::WA),
-                auto_download: true,
-                time_zone: Some(FixedOffset::west(8 * 3600)),
-            },
-            Site {
-                id: "kmso".to_uppercase(),
-                name: Some("Missoula".to_owned()),
-                notes: Some("In a valley.".to_owned()),
-                state: None,
-                auto_download: false,
-                time_zone: None,
-            },
+            Site::new("kord")
+                .with_long_name("Chicago/O'Hare".to_owned())
+                .with_notes("Major air travel hub.".to_owned())
+                .with_state_prov(StateProv::IL)
+                .set_mobile(false),
+            Site::new("ksea")
+                .with_long_name("Seattle".to_owned())
+                .with_notes("A coastal city with coffe and rain".to_owned())
+                .with_state_prov(StateProv::WA)
+                .set_mobile(false),
+            Site::new("kmso")
+                .with_long_name("Missoula".to_owned())
+                .with_notes("In a valley.".to_owned())
+                .with_state_prov(None)
+                .set_mobile(false),
         ];
 
         for site in test_sites {
             arch.add_site(site).expect("Error adding site.");
         }
 
-        let zootown = Site {
-            id: "kmso".to_uppercase(),
-            name: Some("Zootown".to_owned()),
-            notes: Some("Mountains, not coast.".to_owned()),
-            state: None,
-            auto_download: true,
-            time_zone: Some(FixedOffset::west(7 * 3600)),
-        };
+        let retr_site = arch.site_info("kmso").unwrap();
+        assert_eq!(retr_site.short_name(), test_sites[2].short_name());
+        assert_eq!(retr_site.long_name(), test_sites[2].long_name());
+        assert_eq!(retr_site.notes(), test_sites[2].notes());
+        assert_eq!(retr_site.state_prov(), test_sites[2].state_prov());
+
+        let zootown = Site::new("kmso")
+            .with_long_name("Zootown".to_owned())
+            .with_notes("Mountains, not coast.".to_owned())
+            .with_state_prov(None)
+            .set_mobile(false);
 
         arch.set_site_info(&zootown).expect("Error updating site.");
 
-        assert_eq!(arch.site_info("kmso").unwrap(), zootown);
-        assert_ne!(arch.site_info("kmso").unwrap(), test_sites[2]);
+        let retr_site = arch.site_info("kmso").unwrap();
+        assert_eq!(retr_site.short_name(), test_sites[2].short_name());
+        assert_ne!(retr_site.long_name(), test_sites[2].long_name());
+        assert_ne!(retr_site.notes(), test_sites[2].notes());
+        assert_eq!(retr_site.state_prov(), test_sites[2].state_prov());
+
+        assert_eq!(retr_site.short_name(), zootown.short_name());
+        assert_eq!(retr_site.long_name(), zootown.long_name());
+        assert_eq!(retr_site.notes(), zootown.notes());
+        assert_eq!(retr_site.state_prov(), zootown.state_prov());
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -883,17 +777,24 @@ mod unit {
 
         fill_test_archive(&mut arch).expect("Error filling test archive.");
 
-        let models = arch.models("kmso").expect("Error querying archive.");
+        let site = arch.site_info("kmso").expect("Error retrieving site.");
 
-        assert!(models.contains(&Model::GFS));
-        assert!(models.contains(&Model::NAM));
-        assert!(!models.contains(&Model::NAM4KM));
-        assert!(!models.contains(&Model::LocalWrf));
-        assert!(!models.contains(&Model::Other));
+        let types: Vec<String> = arch
+            .sounding_types(&site)
+            .expect("Error querying archive.")
+            .iter()
+            .map(|t| t.source().to_owned())
+            .collect();
+
+        assert!(types.contains(&"GFS".to_owned()));
+        assert!(types.contains(&"NAM".to_owned()));
+        assert!(!types.contains(&"NAM4KM".to_owned()));
+        assert!(!types.contains(&"LocalWrf".to_owned()));
+        assert!(!types.contains(&"Other".to_owned()));
     }
 
     #[test]
-    fn test_inventory() {
+    fn test_inventory() -> Result<(), Box<Error>> {
         let TestArchive {
             tmp: _tmp,
             mut arch,
@@ -901,20 +802,33 @@ mod unit {
 
         fill_test_archive(&mut arch).expect("Error filling test archive.");
 
+        let site = arch.site_info("kmso")?;
+        let gfs = arch.sounding_type_from_str("GFS")?;
+        let nam = arch.sounding_type_from_str("NAM")?;
+
         let first = NaiveDate::from_ymd(2017, 4, 1).and_hms(0, 0, 0);
         let last = NaiveDate::from_ymd(2017, 4, 1).and_hms(18, 0, 0);
-        let missing = vec![(
-            NaiveDate::from_ymd(2017, 4, 1).and_hms(6, 0, 0),
-            NaiveDate::from_ymd(2017, 4, 1).and_hms(6, 0, 0),
-        )];
 
-        let expected = Inventory {
-            first,
-            last,
-            missing,
-            auto_download: false, // this is the default value
-        };
-        assert_eq!(arch.inventory("kmso", Model::NAM).unwrap(), expected);
+        let inv = arch.inventory(&site)?;
+
+        assert_eq!(inv.range(&gfs).unwrap(), (first, last));
+        assert_eq!(inv.range(&nam).unwrap(), (first, last));
+
+        let gfs_locations = dbg!(inv.locations(&gfs));
+        assert_eq!(gfs_locations.len(), 1);
+        assert_eq!(gfs_locations[0].latitude(), 46.92);
+        assert_eq!(gfs_locations[0].longitude(), -114.08);
+        assert_eq!(gfs_locations[0].elevation(), 972);
+        assert!(gfs_locations[0].is_known());
+
+        let nam_locations = inv.locations(&nam);
+        assert_eq!(nam_locations.len(), 1);
+        assert_eq!(nam_locations[0].latitude(), 46.87);
+        assert_eq!(nam_locations[0].longitude(), -114.16);
+        assert_eq!(nam_locations[0].elevation(), 1335);
+        assert!(nam_locations[0].is_known());
+
+        Ok(())
     }
 
     #[test]
@@ -930,25 +844,6 @@ mod unit {
         assert_eq!(arch.count().expect("db error"), 7);
     }
 
-    #[test]
-    fn test_count_init_times() {
-        let TestArchive {
-            tmp: _tmp,
-            mut arch,
-        } = create_test_archive().expect("Failed to create test archive.");
-
-        fill_test_archive(&mut arch).expect("Error filling test archive.");
-
-        assert_eq!(
-            arch.count_init_times("kmso", Model::GFS).expect("db error"),
-            4
-        );
-        assert_eq!(
-            arch.count_init_times("kmso", Model::NAM).expect("db error"),
-            3
-        );
-    }
-
     // ---------------------------------------------------------------------------------------------
     // Add, remove, and retrieve files from the archive
     // ---------------------------------------------------------------------------------------------
@@ -959,19 +854,36 @@ mod unit {
 
         let test_data = get_test_data().expect("Error loading test data.");
 
-        for (site, model, init_time, raw_data) in test_data {
-            arch.add(&site, model, &init_time, &raw_data)
-                .expect("Failure to add.");
-            let recovered_str = arch
-                .retrieve(&site, model, &init_time)
+        for (site, sounding_type, init_time, loc, file_name) in test_data {
+            arch.add(
+                site.clone(),
+                sounding_type.clone(),
+                loc,
+                &init_time,
+                &file_name,
+            )
+            .expect("Failure to add.");
+
+            let site = arch
+                .site_info(site.short_name())
+                .expect("Error retrieving site.");
+            let sounding_type = arch
+                .sounding_type_from_str(sounding_type.source())
+                .expect("Error retrieving sounding_type");
+
+            let recovered_anal = arch
+                .retrieve(&site, &sounding_type, &init_time)
                 .expect("Failure to load.");
 
-            assert!(raw_data == recovered_str);
+            assert_eq!(
+                recovered_anal[0].sounding().valid_time().unwrap(),
+                init_time
+            );
         }
     }
 
     #[test]
-    fn test_get_most_recent_file() {
+    fn test_get_most_recent_file() -> Result<(), Box<Error>> {
         let TestArchive {
             tmp: _tmp,
             mut arch,
@@ -979,14 +891,19 @@ mod unit {
 
         fill_test_archive(&mut arch).expect("Error filling test archive.");
 
+        let kmso = arch.site_info("kmso")?;
+        let snd_type = arch.sounding_type_from_str("GFS")?;;
+
         let init_time = arch
-            .most_recent_valid_time("kmso", Model::GFS)
+            .most_recent_valid_time(&kmso, &snd_type)
             .expect("Error getting valid time.");
 
         assert_eq!(init_time, NaiveDate::from_ymd(2017, 4, 1).and_hms(18, 0, 0));
 
-        arch.most_recent_file("kmso", Model::GFS)
+        arch.most_recent_file(&kmso, &snd_type)
             .expect("Failed to retrieve sounding.");
+
+        Ok(())
     }
 
     #[test]
@@ -998,32 +915,35 @@ mod unit {
 
         fill_test_archive(&mut arch).expect("Error filling test archive.");
 
+        let kmso = arch.site_info("kmso").unwrap();
+        let snd_type = arch.sounding_type_from_str("GFS").unwrap();
+
         println!("Checking for files that should exist.");
         assert!(arch
             .file_exists(
-                "kmso",
-                Model::GFS,
+                &kmso,
+                &snd_type,
                 &NaiveDate::from_ymd(2017, 4, 1).and_hms(0, 0, 0)
             )
             .expect("Error checking for existence"));
         assert!(arch
             .file_exists(
-                "kmso",
-                Model::GFS,
+                &kmso,
+                &snd_type,
                 &NaiveDate::from_ymd(2017, 4, 1).and_hms(6, 0, 0)
             )
             .expect("Error checking for existence"));
         assert!(arch
             .file_exists(
-                "kmso",
-                Model::GFS,
+                &kmso,
+                &snd_type,
                 &NaiveDate::from_ymd(2017, 4, 1).and_hms(12, 0, 0)
             )
             .expect("Error checking for existence"));
         assert!(arch
             .file_exists(
-                "kmso",
-                Model::GFS,
+                &kmso,
+                &snd_type,
                 &NaiveDate::from_ymd(2017, 4, 1).and_hms(18, 0, 0)
             )
             .expect("Error checking for existence"));
@@ -1031,29 +951,29 @@ mod unit {
         println!("Checking for files that should NOT exist.");
         assert!(!arch
             .file_exists(
-                "kmso",
-                Model::GFS,
+                &kmso,
+                &snd_type,
                 &NaiveDate::from_ymd(2018, 4, 1).and_hms(0, 0, 0)
             )
             .expect("Error checking for existence"));
         assert!(!arch
             .file_exists(
-                "kmso",
-                Model::GFS,
+                &kmso,
+                &snd_type,
                 &NaiveDate::from_ymd(2018, 4, 1).and_hms(6, 0, 0)
             )
             .expect("Error checking for existence"));
         assert!(!arch
             .file_exists(
-                "kmso",
-                Model::GFS,
+                &kmso,
+                &snd_type,
                 &NaiveDate::from_ymd(2018, 4, 1).and_hms(12, 0, 0)
             )
             .expect("Error checking for existence"));
         assert!(!arch
             .file_exists(
-                "kmso",
-                Model::GFS,
+                &kmso,
+                &snd_type,
                 &NaiveDate::from_ymd(2018, 4, 1).and_hms(18, 0, 0)
             )
             .expect("Error checking for existence"));
@@ -1069,16 +989,16 @@ mod unit {
         fill_test_archive(&mut arch).expect("Error filling test archive.");
 
         let init_time = NaiveDate::from_ymd(2017, 4, 1).and_hms(0, 0, 0);
-        let model = Model::GFS;
-        let site = "kmso";
+        let kmso = arch.site_info("kmso").unwrap();
+        let snd_type = arch.sounding_type_from_str("GFS").unwrap();
 
         assert!(arch
-            .file_exists(site, model, &init_time)
+            .file_exists(&kmso, &snd_type, &init_time)
             .expect("Error checking db"));
-        arch.remove(site, model, &init_time)
+        arch.remove(&kmso, &snd_type, &init_time)
             .expect("Error while removing.");
         assert!(!arch
-            .file_exists(site, model, &init_time)
+            .file_exists(&kmso, &snd_type, &init_time)
             .expect("Error checking db"));
     }
 }
