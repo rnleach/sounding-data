@@ -1,5 +1,5 @@
 use crate::{errors::BufkitDataErr, site::Site};
-use rusqlite::{types::ToSql, Connection, OptionalExtension, Row, NO_PARAMS};
+use rusqlite::{types::ToSql, Connection, OptionalExtension, Row};
 use std::str::FromStr;
 use strum::AsStaticRef;
 use strum_macros::{AsStaticStr, EnumString};
@@ -151,22 +151,22 @@ pub(crate) fn insert_or_update_sounding_type(
     }
 }
 
-/// Get a list of all the sounding types stored in the database
-#[inline]
-pub(crate) fn all_sounding_types(db: &Connection) -> Result<Vec<SoundingType>, BufkitDataErr> {
-    let mut stmt = db.prepare(
-        "
-            SELECT id, type, file_type, interval, observed 
-            FROM types;
-        ",
-    )?;
+// /// Get a list of all the sounding types stored in the database
+// #[inline]
+// pub(crate) fn all_sounding_types(db: &Connection) -> Result<Vec<SoundingType>, BufkitDataErr> {
+//     let mut stmt = db.prepare(
+//         "
+//             SELECT id, type, file_type, interval, observed
+//             FROM types;
+//         ",
+//     )?;
 
-    let vals: Result<Vec<SoundingType>, BufkitDataErr> = stmt
-        .query_and_then(NO_PARAMS, parse_row_to_sounding_type)?
-        .collect();
+//     let vals: Result<Vec<SoundingType>, BufkitDataErr> = stmt
+//         .query_and_then(NO_PARAMS, parse_row_to_sounding_type)?
+//         .collect();
 
-    vals
-}
+//     vals
+// }
 
 /// Get a list of all the sounding types stored in the database for a particular site
 #[inline]

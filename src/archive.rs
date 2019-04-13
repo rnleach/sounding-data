@@ -4,21 +4,20 @@ use crate::{
     errors::BufkitDataErr,
     inventory::Inventory,
     location::{insert_or_update_location, Location},
-    site::{insert_or_update_site, Site, StateProv},
+    site::{insert_or_update_site, Site},
     sounding_type::{insert_or_update_sounding_type, FileType, SoundingType},
 };
-use chrono::{FixedOffset, NaiveDate, NaiveDateTime};
+use chrono::NaiveDateTime;
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
-use metfor::Quantity;
-use rusqlite::{types::ToSql, Connection, OpenFlags, Row, NO_PARAMS};
+use rusqlite::{types::ToSql, Connection, OpenFlags, NO_PARAMS};
 use sounding_analysis::Analysis;
 use sounding_bufkit::BufkitData;
 use std::{
     collections::HashSet,
     fs::{create_dir, create_dir_all, read_dir, remove_file, File},
-    io::{Read, Write},
+    io::Read,
     path::{Path, PathBuf},
-    str::{from_utf8, FromStr},
+    str::from_utf8,
 };
 use strum::AsStaticRef;
 
@@ -119,24 +118,24 @@ impl Archive {
         Ok((files_in_index_but_not_on_file_system, files_not_in_index))
     }
 
-    /// Given a list of files, remove them from the index, but NOT the file system.
-    pub fn remove_from_index(&self, file_names: &[String]) -> Result<(), BufkitDataErr> {
-        // TODO: implement
-        unimplemented!()
-    }
+    // /// Given a list of files, remove them from the index, but NOT the file system.
+    // fn remove_from_index(&self, file_names: &[String]) -> Result<(), BufkitDataErr> {
+    //     // TODO: implement
+    //     unimplemented!()
+    // }
 
-    /// Given a list of files, remove them from the file system. This assumes they have already been
-    /// removed from the index (or never existed there.)
-    pub fn remove_from_data_store(&self, file_names: &[String]) -> Result<(), BufkitDataErr> {
-        // TODO: implement
-        unimplemented!()
-    }
+    // /// Given a list of files, remove them from the file system. This assumes they have already been
+    // /// removed from the index (or never existed there.)
+    // fn remove_from_data_store(&self, file_names: &[String]) -> Result<(), BufkitDataErr> {
+    //     // TODO: implement
+    //     unimplemented!()
+    // }
 
-    /// Given a list of files, attempt to parse the file names and add them to the index.
-    pub fn add_to_index(&self, file_names: &[String]) -> Result<(), BufkitDataErr> {
-        // TODO: implement
-        unimplemented!()
-    }
+    // /// Given a list of files, attempt to parse the file names and add them to the index.
+    // fn add_to_index(&self, file_names: &[String]) -> Result<(), BufkitDataErr> {
+    //     // TODO: implement
+    //     unimplemented!()
+    // }
 
     // ---------------------------------------------------------------------------------------------
     // The file system aspects of the archive, e.g. the root directory of the archive
@@ -221,43 +220,15 @@ impl Archive {
     // Query archive inventory
     // ---------------------------------------------------------------------------------------------
 
-    /// Get a list of all the available model initialization times for a given site and type.
-    pub fn init_times(
-        &self,
-        site: &Site,
-        sounding_type: &SoundingType,
-    ) -> Result<Vec<NaiveDateTime>, BufkitDataErr> {
-        let mut stmt = self.db_conn.prepare(
-            "
-                SELECT init_time 
-                FROM files 
-                    JOIN sites ON sites.id = files.site_id 
-                    JOIN types ON types.id = files.type_id
-                WHERE sites.short_name = ?1 AND types.type = ?2
-                ORDER BY init_time ASC
-            ",
-        )?;
-
-        let init_times: Result<Vec<Result<NaiveDateTime, _>>, BufkitDataErr> = stmt
-            .query_map(&[site.short_name(), sounding_type.source()], |row| {
-                row.get_checked(0)
-            })?
-            .map(|res| res.map_err(BufkitDataErr::Database))
-            .collect();
-
-        let init_times: Vec<NaiveDateTime> =
-            init_times?.into_iter().filter_map(|res| res.ok()).collect();
-
-        Ok(init_times)
-    }
-
     /// Get an inventory of soundings for a site & model.
     pub fn inventory(&self, site: &Site) -> Result<Inventory, BufkitDataErr> {
+        debug_assert!(site.id() > 0);
         crate::inventory::inventory(&self.db_conn, site.clone())
     }
 
     /// Get a list of models in the archive for this site.
     pub fn sounding_types(&self, site: &Site) -> Result<Vec<SoundingType>, BufkitDataErr> {
+        debug_assert!(site.id() > 0);
         crate::sounding_type::all_sounding_types_for_site(&self.db_conn, site)
     }
 
@@ -267,6 +238,9 @@ impl Archive {
         site: &Site,
         sounding_type: &SoundingType,
     ) -> Result<NaiveDateTime, BufkitDataErr> {
+        debug_assert!(site.id() > 0);
+        debug_assert!(sounding_type.id() > 0);
+
         let init_time: NaiveDateTime = self.db_conn.query_row(
             "
                 SELECT init_time FROM files
@@ -380,11 +354,6 @@ impl Archive {
         Ok(())
     }
 
-    /// Retrieve the sounding type information for a sounding with the specified source.
-    pub fn sounding_type(&self, sounding_type: &str) -> Result<SoundingType, BufkitDataErr> {
-        crate::sounding_type::retrieve_sounding_type(&self.db_conn, sounding_type)
-    }
-
     /// Insert or update a sounding type.
     pub fn update_or_insert_sounding_type(
         &self,
@@ -393,26 +362,50 @@ impl Archive {
         crate::sounding_type::insert_or_update_sounding_type(&self.db_conn, sounding_type)
     }
 
-    /// Retrieve the site information.
-    pub fn site(&self, site: &str) -> Result<Site, BufkitDataErr> {
-        crate::site::retrieve_site(&self.db_conn, site)
-    }
-
     /// Insert or update a site.
     pub fn update_or_insert_site(&self, site: Site) -> Result<Site, BufkitDataErr> {
         crate::site::insert_or_update_site(&self.db_conn, site)
     }
 
-    fn load_data(&self, file_name: &str, ftype: FileType) -> Result<Vec<Analysis>, BufkitDataErr> {
+    fn get_file_name_for(
+        &self,
+        site: &Site,
+        sounding_type: &SoundingType,
+        init_time: &NaiveDateTime,
+    ) -> Result<String, BufkitDataErr> {
+        debug_assert!(site.id() > 0, "Site not checked or added in index");
+        debug_assert!(
+            sounding_type.id() > 0,
+            "Sounding type not checked or added in index."
+        );
+
+        let file_name: String = self.db_conn.query_row(
+            "SELECT file_name FROM files WHERE site_id = ?1 AND type_id = ?2 AND init_time = ?3",
+            &[&site.id(), &sounding_type.id(), init_time as &ToSql],
+            |row| row.get_checked(0),
+        )??;
+
+        Ok(file_name)
+    }
+
+    fn load_data(&self, file_name: &str) -> Result<Vec<u8>, BufkitDataErr> {
         let file = File::open(self.file_dir.join(file_name))?;
         let mut decoder = GzDecoder::new(file);
         let mut buf: Vec<u8> = vec![];
         let _bytes_read = decoder.read_to_end(&mut buf)?;
 
+        Ok(buf)
+    }
+
+    fn decode_data(
+        buf: &[u8],
+        description: &str,
+        ftype: FileType,
+    ) -> Result<Vec<Analysis>, BufkitDataErr> {
         match ftype {
             FileType::BUFKIT => {
                 let bufkit_str = from_utf8(&buf)?;
-                let bufkit_data = BufkitData::init(bufkit_str, file_name)?;
+                let bufkit_data = BufkitData::init(bufkit_str, description)?;
                 let bufkit_anals: Vec<Analysis> = bufkit_data.into_iter().collect();
                 Ok(bufkit_anals)
             }
@@ -427,30 +420,21 @@ impl Archive {
         sounding_type: &SoundingType,
         init_time: &NaiveDateTime,
     ) -> Result<Vec<Analysis>, BufkitDataErr> {
-        debug_assert!(site.id() > 0, "Site not checked or added in index");
-        debug_assert!(
-            sounding_type.id() > 0,
-            "Sounding type not checked or added in index."
-        );
-
-        let file_name: String = self.db_conn.query_row(
-            "SELECT file_name FROM files WHERE site_id = ?1 AND type_id = ?2 AND init_time = ?3",
-            &[&site.id(), &sounding_type.id(), init_time as &ToSql],
-            |row| row.get_checked(0),
-        )??;
-
-        self.load_data(&file_name, sounding_type.file_type())
+        let file_name = self.get_file_name_for(site, sounding_type, init_time)?;
+        let data = self.load_data(&file_name)?;
+        Self::decode_data(&data, &file_name, sounding_type.file_type())
     }
 
-    /// Retrieve and uncompress a file, then save it in the given `export_dir`.
+    /// Retrieve and uncompress a file.
     pub fn export(
         &self,
         site: &Site,
         sounding_type: &SoundingType,
         init_time: &NaiveDateTime,
-        export_dir: &str,
-    ) -> Result<(), BufkitDataErr> {
-        unimplemented!()
+    ) -> Result<impl Read, BufkitDataErr> {
+        let file_name = self.get_file_name_for(site, sounding_type, init_time)?;
+        let file = File::open(self.file_dir.join(file_name))?;
+        Ok(GzDecoder::new(file))
     }
 
     /// Retrieve the  most recent file as a sounding.
@@ -480,48 +464,30 @@ impl Archive {
         .into()
     }
 
-    fn parse_compressed_file_name(fname: &str) -> Option<(NaiveDateTime, SoundingType, String)> {
-        // let tokens: Vec<&str> = fname.split(|c| c == '_' || c == '.').collect();
+    // fn parse_compressed_file_name(fname: &str) -> Option<(NaiveDateTime, SoundingType, String)> {
+    //     // let tokens: Vec<&str> = fname.split(|c| c == '_' || c == '.').collect();
 
-        // if tokens.len() != 5 {
-        //     return None;
-        // }
+    //     // if tokens.len() != 5 {
+    //     //     return None;
+    //     // }
 
-        // let year = tokens[0][0..4].parse::<i32>().ok()?;
-        // let month = tokens[0][4..6].parse::<u32>().ok()?;
-        // let day = tokens[0][6..8].parse::<u32>().ok()?;
-        // let hour = tokens[0][8..10].parse::<u32>().ok()?;
-        // let init_time = NaiveDate::from_ymd(year, month, day).and_hms(hour, 0, 0);
+    //     // let year = tokens[0][0..4].parse::<i32>().ok()?;
+    //     // let month = tokens[0][4..6].parse::<u32>().ok()?;
+    //     // let day = tokens[0][6..8].parse::<u32>().ok()?;
+    //     // let hour = tokens[0][8..10].parse::<u32>().ok()?;
+    //     // let init_time = NaiveDate::from_ymd(year, month, day).and_hms(hour, 0, 0);
 
-        // let model = Model::from_str(tokens[1]).ok()?;
+    //     // let model = Model::from_str(tokens[1]).ok()?;
 
-        // let site = tokens[2].to_owned();
+    //     // let site = tokens[2].to_owned();
 
-        // if tokens[3] != "buf" || tokens[4] != "gz" {
-        //     return None;
-        // }
+    //     // if tokens[3] != "buf" || tokens[4] != "gz" {
+    //     //     return None;
+    //     // }
 
-        // Some((init_time, model, site))
-        unimplemented!()
-    }
-
-    /// Get the file name this would have if uncompressed.
-    pub fn file_name(
-        &self,
-        site: &Site,
-        sounding_type: &SoundingType,
-        init_time: &NaiveDateTime,
-    ) -> String {
-        // let file_string = init_time.format("%Y%m%d%HZ").to_string();
-
-        // format!(
-        //     "{}_{}_{}.buf",
-        //     file_string,
-        //     model.as_static(),
-        //     site_id.to_uppercase()
-        // )
-        unimplemented!()
-    }
+    //     // Some((init_time, model, site))
+    //     unimplemented!()
+    // }
 
     /// Remove a file from the archive.
     pub fn remove(
@@ -553,14 +519,11 @@ impl Archive {
 #[cfg(test)]
 mod unit {
     use super::*;
-    use crate::{FileType, Location};
+    use crate::{FileType, Location, StateProv};
     use chrono::NaiveDate;
+    use metfor::Quantity;
     use sounding_bufkit::BufkitFile;
-    use std::{
-        collections::{HashMap, HashSet},
-        error::Error,
-        fs::read_dir,
-    };
+    use std::{error::Error, fs::read_dir};
     use tempdir::TempDir;
 
     // struct to hold temporary data for tests.
@@ -906,7 +869,7 @@ mod unit {
                 .site_info(site.short_name())
                 .expect("Error retrieving site.");
             let sounding_type = arch
-                .sounding_type(sounding_type.source())
+                .sounding_type_from_str(sounding_type.source())
                 .expect("Error retrieving sounding_type");
 
             let recovered_anal = arch
@@ -930,7 +893,7 @@ mod unit {
         fill_test_archive(&mut arch).expect("Error filling test archive.");
 
         let kmso = arch.site_info("kmso")?;
-        let snd_type = arch.sounding_type("GFS")?;;
+        let snd_type = arch.sounding_type_from_str("GFS")?;;
 
         let init_time = arch
             .most_recent_valid_time(&kmso, &snd_type)

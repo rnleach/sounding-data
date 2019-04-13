@@ -167,28 +167,28 @@ pub(crate) fn insert_or_update_location(
     }
 }
 
-/// Retrieve the location associated with these coordinates.
-#[inline]
-pub(crate) fn retrieve_location(
-    db: &Connection,
-    latitude: f64,
-    longitude: f64,
-    elevation_m: i32,
-) -> Result<Location, BufkitDataErr> {
-    db.query_row(
-        "
-            SELECT id, latitude, longitude, elevation_meters, tz_offset_seconds 
-            FROM locations
-            WHERE latitude = ?1 AND longitude = ?2 AND elevation_meters = ?3
-        ",
-        &[
-            &((latitude * 1_000_000.0) as i64),
-            &((longitude * 1_000_000.0) as i64),
-            &elevation_m as &ToSql,
-        ],
-        parse_row_to_location,
-    )?
-}
+// /// Retrieve the location associated with these coordinates.
+// #[inline]
+// pub(crate) fn retrieve_location(
+//     db: &Connection,
+//     latitude: f64,
+//     longitude: f64,
+//     elevation_m: i32,
+// ) -> Result<Location, BufkitDataErr> {
+//     db.query_row(
+//         "
+//             SELECT id, latitude, longitude, elevation_meters, tz_offset_seconds
+//             FROM locations
+//             WHERE latitude = ?1 AND longitude = ?2 AND elevation_meters = ?3
+//         ",
+//         &[
+//             &((latitude * 1_000_000.0) as i64),
+//             &((longitude * 1_000_000.0) as i64),
+//             &elevation_m as &ToSql,
+//         ],
+//         parse_row_to_location,
+//     )?
+// }
 
 /// Retrieve all the different location associated with a given `Site` and `SoundingType`
 #[inline]
