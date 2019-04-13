@@ -1,5 +1,12 @@
 //! An archive of soundings in various formats.
 
+use crate::{
+    errors::BufkitDataErr,
+    inventory::Inventory,
+    location::{insert_or_update_location, Location},
+    site::{insert_or_update_site, Site, StateProv},
+    sounding_type::{insert_or_update_sounding_type, FileType, SoundingType},
+};
 use chrono::{FixedOffset, NaiveDate, NaiveDateTime};
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use metfor::Quantity;
@@ -8,21 +15,12 @@ use sounding_analysis::Analysis;
 use sounding_bufkit::BufkitData;
 use std::{
     collections::HashSet,
-    ffi::{OsStr, OsString},
     fs::{create_dir, create_dir_all, read_dir, remove_file, File},
     io::{Read, Write},
     path::{Path, PathBuf},
     str::{from_utf8, FromStr},
 };
 use strum::AsStaticRef;
-
-use crate::{
-    errors::BufkitDataErr,
-    inventory::Inventory,
-    location::{insert_or_update_location, Location},
-    site::{insert_or_update_site, Site, StateProv},
-    sounding_type::{insert_or_update_sounding_type, FileType, SoundingType},
-};
 
 /// The archive.
 #[derive(Debug)]
@@ -90,35 +88,30 @@ impl Archive {
     ///
     /// The first set returned in the tuple is the files in the index but not the file system. The
     /// second set returned in the tuple is the files on the system but not in the index.
-    pub fn check(&self) -> Result<(Vec<OsString>, Vec<OsString>), BufkitDataErr> {
+    pub fn check(&self) -> Result<(Vec<String>, Vec<String>), BufkitDataErr> {
         self.db_conn.execute("PRAGMA cache_size=10000", NO_PARAMS)?;
-
-        self.db_conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS fname ON files (file_name)",
-            NO_PARAMS,
-        )?;
 
         let mut all_files_stmt = self.db_conn.prepare("SELECT file_name FROM files")?;
 
-        let index_vals: Result<HashSet<OsString>, BufkitDataErr> = all_files_stmt
+        let index_vals: Result<HashSet<String>, BufkitDataErr> = all_files_stmt
             .query_map(NO_PARAMS, |row| -> String { row.get(0) })?
             .map(|res| res.map_err(BufkitDataErr::Database))
-            .map(|res| res.map(OsString::from))
+            .map(|res| res.map(String::from))
             .collect();
         let index_vals = index_vals?;
 
-        let file_system_vals: HashSet<OsString> = read_dir(&self.file_dir)?
+        let file_system_vals: HashSet<String> = read_dir(&self.file_dir)?
             .filter_map(|de| de.ok())
             .map(|de| de.path())
             .filter(|p| p.is_file())
-            .filter_map(|p| p.file_name().map(|p| p.to_owned()))
+            .filter_map(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
             .collect();
 
-        let files_in_index_but_not_on_file_system: Vec<OsString> = index_vals
+        let files_in_index_but_not_on_file_system: Vec<String> = index_vals
             .difference(&file_system_vals)
             .map(|s| s.to_owned())
             .collect();
-        let files_not_in_index: Vec<OsString> = file_system_vals
+        let files_not_in_index: Vec<String> = file_system_vals
             .difference(&index_vals)
             .map(|s| s.to_owned())
             .collect();
@@ -127,7 +120,7 @@ impl Archive {
     }
 
     /// Given a list of files, remove them from the index, but NOT the file system.
-    pub fn remove_from_index(&self, file_names: &[OsString]) -> Result<(), BufkitDataErr> {
+    pub fn remove_from_index(&self, file_names: &[String]) -> Result<(), BufkitDataErr> {
         // TODO: implement
         unimplemented!()
     }
@@ -139,9 +132,8 @@ impl Archive {
         unimplemented!()
     }
 
-    /// Remove files from both the index and the file store.
-    // FIXME: Use OsString instead of String.
-    pub fn remove_files(&self, file_names: &[String]) -> Result<(), BufkitDataErr> {
+    /// Given a list of files, attempt to parse the file names and add them to the index.
+    pub fn add_to_index(&self, file_names: &[String]) -> Result<(), BufkitDataErr> {
         // TODO: implement
         unimplemented!()
     }
@@ -155,11 +147,14 @@ impl Archive {
     // ---------------------------------------------------------------------------------------------
     // Query or modify site metadata
     // ---------------------------------------------------------------------------------------------
-    fn short_name_to_site(&self, short_name: &str) -> Result<Site, BufkitDataErr> {
+    pub fn short_name_to_site(&self, short_name: &str) -> Result<Site, BufkitDataErr> {
         crate::site::retrieve_site(&self.db_conn, short_name)
     }
 
-    fn sounding_type_from_str(&self, sounding_type: &str) -> Result<SoundingType, BufkitDataErr> {
+    pub fn sounding_type_from_str(
+        &self,
+        sounding_type: &str,
+    ) -> Result<SoundingType, BufkitDataErr> {
         crate::sounding_type::retrieve_sounding_type(&self.db_conn, sounding_type)
     }
 
@@ -327,7 +322,7 @@ impl Archive {
         sounding_type: SoundingType,
         location: Location,
         init_time: &NaiveDateTime,
-        file_name: &OsStr,
+        file_name: &str,
     ) -> Result<(), BufkitDataErr> {
         let site = if site.is_known() {
             site
@@ -341,7 +336,7 @@ impl Archive {
             self.update_or_insert_sounding_type(sounding_type)?
         };
 
-        let fname: OsString = self.compressed_file_name(&site, &sounding_type, init_time);
+        let fname: String = self.compressed_file_name(&site, &sounding_type, init_time);
 
         let sounding_type = if sounding_type.is_known() {
             sounding_type
@@ -376,7 +371,7 @@ impl Archive {
                 &site.id(),
                 &location.id(),
                 &init_time as &ToSql,
-                &fname.to_string_lossy(),
+                &fname,
             ],
         )?;
 
@@ -453,7 +448,7 @@ impl Archive {
         site: &Site,
         sounding_type: &SoundingType,
         init_time: &NaiveDateTime,
-        export_dir: &OsStr,
+        export_dir: &str,
     ) -> Result<(), BufkitDataErr> {
         unimplemented!()
     }
@@ -473,7 +468,7 @@ impl Archive {
         site: &Site,
         sounding_type: &SoundingType,
         init_time: &NaiveDateTime,
-    ) -> OsString {
+    ) -> String {
         let file_string = init_time.format("%Y%m%d%HZ").to_string();
 
         format!(
@@ -485,7 +480,7 @@ impl Archive {
         .into()
     }
 
-    fn parse_compressed_file_name(fname: &OsStr) -> Option<(NaiveDateTime, SoundingType, String)> {
+    fn parse_compressed_file_name(fname: &str) -> Option<(NaiveDateTime, SoundingType, String)> {
         // let tokens: Vec<&str> = fname.split(|c| c == '_' || c == '.').collect();
 
         // if tokens.len() != 5 {
@@ -584,7 +579,7 @@ mod unit {
 
     // Function to fetch a list of test files.
     fn get_test_data(
-    ) -> Result<Vec<(Site, SoundingType, NaiveDateTime, Location, OsString)>, BufkitDataErr> {
+    ) -> Result<Vec<(Site, SoundingType, NaiveDateTime, Location, String)>, BufkitDataErr> {
         let path = PathBuf::new().join("example_data");
 
         let files = read_dir(path)?
@@ -630,7 +625,13 @@ mod unit {
             let elev_m = snd.station_info().elevation().unwrap().unpack();
             let loc = Location::new(lat, lon, elev_m as i32, None);
 
-            to_return.push((site.to_owned(), model, init_time, loc, OsString::from(path)))
+            to_return.push((
+                site.to_owned(),
+                model,
+                init_time,
+                loc,
+                path.to_string_lossy().to_string(),
+            ))
         }
 
         Ok(to_return)

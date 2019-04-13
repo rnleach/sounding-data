@@ -37,7 +37,7 @@ CREATE TABLE files (
 );
 
 -- For fast searches by file name.
-CREATE INDEX file_names ON files(file_name);  
+CREATE UNIQUE INDEX fname ON files(file_name);  
 
 -- For fast searches by metadata.
 CREATE UNIQUE INDEX no_dups ON files(type_id, site_id, init_time); 
