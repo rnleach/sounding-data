@@ -18,13 +18,15 @@ travis-ci = { repository = "rnleach/sounding-data", branch = "master" }
 [dependencies]
 chrono = "0.4.2"
 flate2 = {version = "1.0", features = ["rust_backend"], default-features = false }
+fnv = "1"
 rusqlite = { version = "0.16", features = ["bundled", "chrono"], default-features = false }
-sounding-bufkit = {git = "https://github.com/rnleach/sounding-bufkit.git", branch="dev"}
 sounding-analysis = {git = "https://github.com/rnleach/sounding-analysis.git", branch="dev"}
+sounding-bufkit = {git = "https://github.com/rnleach/sounding-bufkit.git", branch="dev"}
 strum = "0.13"
 strum_macros = "0.13"
 
 [dev-dependencies]
+metfor = "0.7"
 tempdir = "0.3"
 
 [profile.release]
