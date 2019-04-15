@@ -1,6 +1,6 @@
 [package]
 name = "sounding-data"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Ryan Leach <clumsycodemonkey@gmail.com>"]
 description = "A crate to manage an archive of sounding files."
 repository = "https://github.com/rnleach/sounding-data.git"

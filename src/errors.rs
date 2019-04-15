@@ -3,6 +3,8 @@ use sounding_analysis::AnalysisError;
 use std::error::Error;
 use std::fmt::Display;
 
+pub type Result<T> = std::result::Result<T, BufkitDataErr>;
+
 /// FIXME: Rename this error.
 /// Error from the archive interface.
 #[derive(Debug)]
@@ -34,14 +36,12 @@ pub enum BufkitDataErr {
     //
     // My own errors from this crate
     //
-    /// Invalid model name
-    InvalidModelName(String),
     /// Not enough data to complete the task.
     NotEnoughData,
 }
 
 impl Display for BufkitDataErr {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::result::Result<(), std::fmt::Error> {
         use crate::BufkitDataErr::*;
 
         match self {
@@ -54,13 +54,26 @@ impl Display for BufkitDataErr {
             StrumError(err) => write!(f, "error forwarded from strum crate: {}", err),
             GeneralError(msg) => write!(f, "general error forwarded: {}", msg),
 
-            InvalidModelName(mdl_nm) => write!(f, "invalid model name: {}", mdl_nm),
             NotEnoughData => write!(f, "not enough data to complete task"),
         }
     }
 }
 
-impl Error for BufkitDataErr {}
+impl Error for BufkitDataErr {
+    fn source(&self)-> Option<&(dyn Error + 'static)>{
+        use crate::BufkitDataErr::*;
+
+        match self {
+            SoundingAnalysis(err) => Some(err),
+            Io(err) =>  Some(err),
+            Utf8(err) =>  Some(err),
+            Database(err) =>  Some(err),
+            StrumError(err) =>  Some(err),
+            GeneralError(msg) => None,
+            NotEnoughData => None,
+        }
+    }
+}
 
 impl From<AnalysisError> for BufkitDataErr {
     fn from(err: AnalysisError) -> BufkitDataErr {

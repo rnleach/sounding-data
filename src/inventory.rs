@@ -1,4 +1,4 @@
-use crate::{errors::BufkitDataErr, location::Location, site::Site, sounding_type::SoundingType};
+use crate::{errors::Result, location::Location, site::Site, sounding_type::SoundingType};
 use chrono::{Duration, NaiveDateTime};
 use fnv::{FnvHashMap, FnvHashSet};
 use rusqlite::Connection;
@@ -56,7 +56,7 @@ impl Inventory {
 }
 
 /// Get an inventory of models and dates for a sounding
-pub fn inventory(db: &Connection, site: Site) -> Result<Inventory, BufkitDataErr> {
+pub fn inventory(db: &Connection, site: Site) -> Result<Inventory> {
     debug_assert!(site.id() > 0);
 
     // Get all the sounding types for this site
@@ -71,7 +71,7 @@ pub fn inventory(db: &Connection, site: Site) -> Result<Inventory, BufkitDataErr
     for sounding_type in sounding_types.iter() {
         // Add locations
         let locs_for_type =
-            crate::location::retrieve_locations_for_site_and_type(db, &site, &sounding_type)?;
+            crate::location::all_locations_for_site_and_type(db, &site, &sounding_type)?;
         locations.insert(sounding_type.clone(), locs_for_type);
 
         // Add the range

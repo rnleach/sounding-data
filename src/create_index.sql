@@ -40,6 +40,9 @@ CREATE TABLE files (
 CREATE UNIQUE INDEX fname ON files(file_name);  
 
 -- For fast searches by metadata.
-CREATE UNIQUE INDEX no_dups ON files(type_id, site_id, init_time); 
+CREATE UNIQUE INDEX no_dups_files ON files(type_id, site_id, init_time); 
+
+-- Force unique locations
+CREATE UNIQUE INDEX no_dups_locations ON locations(latitude, longitude, elevation_meters);
 
 COMMIT;

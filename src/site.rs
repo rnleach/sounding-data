@@ -1,4 +1,4 @@
-use crate::errors::BufkitDataErr;
+use crate::errors::{Result, BufkitDataErr};
 use rusqlite::{types::ToSql, Connection, OptionalExtension, Row, NO_PARAMS};
 use std::str::FromStr;
 use strum::AsStaticRef;
@@ -128,8 +128,8 @@ impl Site {
 
 /// Retrieve the sounding type information from the database for the given source name.
 #[inline]
-pub(crate) fn retrieve_site(db: &Connection, short_name: &str) -> Result<Site, BufkitDataErr> {
-    db.query_row(
+pub(crate) fn retrieve_site(db: &Connection, short_name: &str) -> Result<Option<Site>> {
+    match db.query_row(
         "
             SELECT id, short_name, long_name, state, notes, mobile_sounding_site 
             FROM sites 
@@ -137,13 +137,17 @@ pub(crate) fn retrieve_site(db: &Connection, short_name: &str) -> Result<Site, B
         ",
         &[&short_name],
         parse_row_to_site,
-    )?
-    .map_err(BufkitDataErr::from)
+    ) {
+        Ok(Ok(site)) => Ok(Some(site)),
+        Ok(Err(err)) => Err(err),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(err) => Err(BufkitDataErr::from(err)),
+    }
 }
 
 /// Insert or update the site information in the database.
 #[inline]
-pub(crate) fn insert_or_update_site(db: &Connection, site: Site) -> Result<Site, BufkitDataErr> {
+pub(crate) fn insert_or_update_site(db: &Connection, site: Site) -> Result<Site> {
     if let Some(row_id) = db
         .query_row(
             "SELECT rowid FROM sites WHERE short_name = ?1",
@@ -193,7 +197,7 @@ pub(crate) fn insert_or_update_site(db: &Connection, site: Site) -> Result<Site,
 
 /// Get a list of sites from the index
 #[inline]
-pub(crate) fn all_sites(db: &Connection) -> Result<Vec<Site>, BufkitDataErr> {
+pub(crate) fn all_sites(db: &Connection) -> Result<Vec<Site>> {
     let mut stmt = db.prepare(
         "
             SELECT id, short_name, long_name, state, notes, mobile_sounding_site
@@ -201,13 +205,13 @@ pub(crate) fn all_sites(db: &Connection) -> Result<Vec<Site>, BufkitDataErr> {
         ",
     )?;
 
-    let vals: Result<Vec<Site>, BufkitDataErr> =
+    let vals: Result<Vec<Site>> =
         stmt.query_and_then(NO_PARAMS, parse_row_to_site)?.collect();
 
     vals
 }
 
-fn parse_row_to_site(row: &Row) -> Result<Site, BufkitDataErr> {
+fn parse_row_to_site(row: &Row) -> Result<Site> {
     let short_name: String = row.get_checked(1)?;
     let long_name: Option<String> = row.get_checked(2)?;
     let notes: Option<String> = row.get_checked(4)?;
@@ -300,7 +304,7 @@ pub enum StateProv {
 mod unit {
     use super::*;
     use rusqlite::{Connection, OpenFlags};
-    use std::{error::Error, str::FromStr};
+    use std::{str::FromStr};
     use strum::{AsStaticRef, IntoEnumIterator};
     use tempdir::TempDir;
 
@@ -349,7 +353,7 @@ mod unit {
     }
 
     #[test]
-    fn test_insert_retrieve_site() -> Result<(), Box<Error>> {
+    fn test_insert_retrieve_site() -> Result<()> {
         let tmp = TempDir::new("bufkit-data-test-archive")?;
         let db_file = tmp.as_ref().join("test_index.sqlite");
         let db_conn = Connection::open_with_flags(
@@ -359,7 +363,7 @@ mod unit {
         db_conn.execute_batch(include_str!("create_index.sql"))?;
 
         insert_or_update_site(&db_conn, Site::new("kmso"))?;
-        let site = dbg!(retrieve_site(&db_conn, "kmso"))?;
+        let site = dbg!(retrieve_site(&db_conn, "kmso"))?.unwrap();
 
         assert_eq!(site.short_name(), "kmso");
 

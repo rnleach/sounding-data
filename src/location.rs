@@ -1,5 +1,5 @@
-use crate::{errors::BufkitDataErr, site::Site, sounding_type::SoundingType};
-use rusqlite::{types::ToSql, Connection, OptionalExtension, Row};
+use crate::{errors::{BufkitDataErr, Result}, site::Site, sounding_type::SoundingType};
+use rusqlite::{types::ToSql, Connection, OptionalExtension, Row, NO_PARAMS};
 
 /// A geographic location.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -107,12 +107,56 @@ impl Location {
     }
 }
 
+/// Get a list of locations from the index
+#[inline]
+pub(crate) fn all_locations(db: &Connection) -> Result<Vec<Location>> {
+    let mut stmt = db.prepare(
+        "
+            SELECT id, latitude, longitude, elevation_meters, tz_offset_seconds
+            FROM locations;
+        ",
+    )?;
+
+    let vals: Result<Vec<Location>> =
+        stmt.query_and_then(NO_PARAMS, parse_row_to_location)?.collect();
+
+    vals
+}
+
+/// Retrieve the location associated with these coordinates.
+#[inline]
+pub(crate) fn retrieve_location(
+    db: &Connection,
+    latitude: f64,
+    longitude: f64,
+    elevation_m: i32,
+) -> Result<Option<Location>> {
+    match db.query_row(
+        "
+            SELECT id, latitude, longitude, elevation_meters, tz_offset_seconds
+            FROM locations
+            WHERE latitude = ?1 AND longitude = ?2 AND elevation_meters = ?3
+        ",
+        &[
+            &((latitude * 1_000_000.0) as i64),
+            &((longitude * 1_000_000.0) as i64),
+            &elevation_m as &ToSql,
+        ],
+        parse_row_to_location,
+    ){
+        Ok(Ok(location)) => Ok(Some(location)),
+        Ok(Err(err)) => Err(err),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(err) => Err(BufkitDataErr::from(err)),
+    }
+}
+
 /// Insert or update the location information in the database.
 #[inline]
 pub(crate) fn insert_or_update_location(
     db: &Connection,
     location: Location,
-) -> Result<Location, BufkitDataErr> {
+) -> Result<Location> {
     if let Some(row_id) = db
         .query_row(
             "
@@ -167,36 +211,13 @@ pub(crate) fn insert_or_update_location(
     }
 }
 
-// /// Retrieve the location associated with these coordinates.
-// #[inline]
-// pub(crate) fn retrieve_location(
-//     db: &Connection,
-//     latitude: f64,
-//     longitude: f64,
-//     elevation_m: i32,
-// ) -> Result<Location, BufkitDataErr> {
-//     db.query_row(
-//         "
-//             SELECT id, latitude, longitude, elevation_meters, tz_offset_seconds
-//             FROM locations
-//             WHERE latitude = ?1 AND longitude = ?2 AND elevation_meters = ?3
-//         ",
-//         &[
-//             &((latitude * 1_000_000.0) as i64),
-//             &((longitude * 1_000_000.0) as i64),
-//             &elevation_m as &ToSql,
-//         ],
-//         parse_row_to_location,
-//     )?
-// }
-
 /// Retrieve all the different location associated with a given `Site` and `SoundingType`.
 #[inline]
-pub(crate) fn retrieve_locations_for_site_and_type(
+pub(crate) fn all_locations_for_site_and_type(
     db: &Connection,
     site: &Site,
     sounding_type: &SoundingType,
-) -> Result<Vec<Location>, BufkitDataErr> {
+) -> Result<Vec<Location>> {
     let mut stmt = db.prepare(
         "
             SELECT id, latitude, longitude, elevation_meters, tz_offset_seconds 
@@ -209,14 +230,14 @@ pub(crate) fn retrieve_locations_for_site_and_type(
         ",
     )?;
 
-    let vals: Result<Vec<Location>, BufkitDataErr> = stmt
+    let vals: Result<Vec<Location>> = stmt
         .query_and_then(&[site.id(), sounding_type.id()], parse_row_to_location)?
         .collect();
 
     vals
 }
 
-fn parse_row_to_location(row: &Row) -> Result<Location, BufkitDataErr> {
+fn parse_row_to_location(row: &Row) -> Result<Location> {
     let id: i64 = row.get_checked(0)?;
     let latitude: f64 = row.get_checked::<_, i64>(1)? as f64 / 1_000_000.0;
     let longitude: f64 = row.get_checked::<_, i64>(2)? as f64 / 1_000_000.0;
