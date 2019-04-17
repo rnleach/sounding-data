@@ -3,7 +3,7 @@
 use crate::{
     errors::{BufkitDataErr, Result},
     inventory::Inventory,
-    location::{insert_or_update_location, Location},
+    location::Location,
     site::Site,
     sounding_type::{FileType, SoundingType},
 };
@@ -19,7 +19,6 @@ use std::{
     path::{Path, PathBuf},
     str::from_utf8,
 };
-use strum::AsStaticRef;
 
 /// The archive.
 #[derive(Debug)]
@@ -154,7 +153,15 @@ impl Archive {
     /// Any object returned in an `Ok(_)` from this method will return true from the `.is_valid()`
     /// method.
     pub fn validate_site(&self, site: Site) -> Result<Site> {
-        unimplemented!()
+        if site.is_valid() {
+            Ok(site)
+        } else if let Some(retrieved_site) =
+            crate::site::retrieve_site(&self.db_conn, site.short_name())?
+        {
+            Ok(retrieved_site)
+        } else {
+            Err(BufkitDataErr::InvalidSite(site))
+        }
     }
 
     /// Validate that this `Site` is in the index, if not, insert it into the index.
@@ -212,7 +219,15 @@ impl Archive {
     /// Any object returned in an `Ok(_)` from this method will return true from the `.is_valid()`
     /// method.
     pub fn validate_sounding_type(&self, sounding_type: SoundingType) -> Result<SoundingType> {
-        unimplemented!()
+        if sounding_type.is_valid() {
+            Ok(sounding_type)
+        } else if let Some(retrieved_st) =
+            crate::sounding_type::retrieve_sounding_type(&self.db_conn, sounding_type.source())?
+        {
+            Ok(retrieved_st)
+        } else {
+            Err(BufkitDataErr::InvalidSoundingType(sounding_type))
+        }
     }
 
     /// Validate that this `SoundingType` is in the index, if not, add it to the index.
@@ -275,7 +290,7 @@ impl Archive {
     /// there is not a matching `Location` in the index with the same coordinates to modify.
     /// Basically you can only modify the time zone offset information.
     pub fn set_location_info(&self, location: Location) -> Result<Location> {
-        unimplemented!()
+        crate::location::update_location(&self.db_conn, location)
     }
 
     /// Get a list of `Location`s in the archive for this site.
@@ -292,8 +307,19 @@ impl Archive {
     ///
     /// Any object returned in an `Ok(_)` from this method will return true from the `.is_valid()`
     /// method.
-    pub fn validate_location(&self, location: Location) -> Result<bool> {
-        unimplemented!()
+    pub fn validate_location(&self, location: Location) -> Result<Location> {
+        if location.is_valid() {
+            Ok(location)
+        } else if let Some(retrieved_loc) = crate::location::retrieve_location(
+            &self.db_conn,
+            location.latitude(),
+            location.longitude(),
+            location.elevation(),
+        )? {
+            Ok(retrieved_loc)
+        } else {
+            Err(BufkitDataErr::InvalidLocation(location))
+        }
     }
 
     /// Validate that this `Location` is in the index, if not, add it to the index.
@@ -573,7 +599,7 @@ mod unit {
     use chrono::NaiveDate;
     use metfor::Quantity;
     use sounding_bufkit::BufkitFile;
-    use std::{error::Error, fs::read_dir};
+    use std::fs::read_dir;
     use tempdir::TempDir;
 
     // struct to hold temporary data for tests.
@@ -681,11 +707,24 @@ mod unit {
         assert!(Archive::connect("unlikely_directory_in_my_project").is_err());
     }
 
+    #[test]
+    fn test_check() {
+        let TestArchive { tmp: _, arch } =
+            create_test_archive().expect("Failed to create test archive.");
+
+        // Delete a file from the archive
+        // Add an extra file to the archive
+
+        let (_missing_files, _extra_files) = arch.check().unwrap();
+
+        assert!(false, "Test not yet implemented.");
+    }
+
     // ---------------------------------------------------------------------------------------------
     // Query or modify site metadata
     // ---------------------------------------------------------------------------------------------
     #[test]
-    fn test_sites_round_trip() -> Result<()> {
+    fn test_sites() -> Result<()> {
         let TestArchive { tmp: _tmp, arch } =
             create_test_archive().expect("Failed to create test archive.");
 
@@ -697,7 +736,7 @@ mod unit {
                 .set_mobile(false),
             Site::new("ksea")
                 .with_long_name("Seattle".to_owned())
-                .with_notes("A coastal city with coffee and rain".to_owned())
+                .with_notes("A coastal city with coffe and rain".to_owned())
                 .with_state_prov(StateProv::WA)
                 .set_mobile(false),
             Site::new("kmso")
@@ -708,22 +747,20 @@ mod unit {
         ];
 
         for site in test_sites.iter_mut() {
-            *site = arch.validate_or_add_site(site.clone())?;
+            *site = arch
+                .validate_or_add_site(site.clone())
+                .expect("Error adding site.");
         }
 
-        assert_eq!(arch.site_info("ksea")?.unwrap().short_name(), "ksea");
-        assert_eq!(arch.site_info("kord")?.unwrap().short_name(), "kord");
-        assert_eq!(arch.site_info("xyz")?, None);
+        let sites = dbg!(arch.sites())?;
+        let sites: Vec<_> = sites.iter().map(|s| s.short_name()).collect();
 
-        let retrieved_sites = arch.sites().expect("Error retrieving sites.");
+        assert_eq!(sites.len(), 3);
+        assert!(sites.contains(&"kmso"));
+        assert!(sites.contains(&"ksea"));
+        assert!(sites.contains(&"kord"));
+        assert!(!sites.contains(&"xyz"));
 
-        for site in retrieved_sites {
-            println!("{:#?}", site);
-            assert!(test_sites
-                .iter()
-                .find(|st| st.short_name() == site.short_name())
-                .is_some());
-        }
         Ok(())
     }
 
@@ -824,11 +861,132 @@ mod unit {
         assert_eq!(retr_site.state_prov(), zootown.state_prov());
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // Query archive inventory
-    // ---------------------------------------------------------------------------------------------
     #[test]
-    fn test_sounding_types() {
+    fn test_validate_site() -> Result<()> {
+        let TestArchive { tmp: _tmp, arch } =
+            create_test_archive().expect("Failed to create test archive.");
+
+        let test_sites = [
+            Site::new("kord")
+                .with_long_name("Chicago/O'Hare".to_owned())
+                .with_notes("Major air travel hub.".to_owned())
+                .with_state_prov(StateProv::IL)
+                .set_mobile(false),
+            Site::new("ksea")
+                .with_long_name("Seattle".to_owned())
+                .with_notes("A coastal city with coffe and rain".to_owned())
+                .with_state_prov(StateProv::WA)
+                .set_mobile(false),
+            Site::new("kmso")
+                .with_long_name("Missoula".to_owned())
+                .with_notes("In a valley.".to_owned())
+                .with_state_prov(None)
+                .set_mobile(false),
+        ];
+
+        for site in test_sites.iter() {
+            arch.validate_or_add_site(site.clone())?;
+        }
+
+        for site in test_sites.iter() {
+            let valid_site = arch.validate_site(site.clone())?;
+
+            assert!(valid_site.is_valid());
+            assert_eq!(valid_site.short_name(), site.short_name());
+        }
+
+        let bad_site = Site::new("kxyz")
+            .with_long_name("not real".to_owned())
+            .with_notes("I made this up, it may be real anyway.".to_owned())
+            .with_state_prov(None)
+            .set_mobile(false);
+
+        assert!(arch.validate_site(bad_site).is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_or_add_site() -> Result<()> {
+        let TestArchive { tmp: _tmp, arch } =
+            create_test_archive().expect("Failed to create test archive.");
+
+        let mut test_sites = [
+            Site::new("kord")
+                .with_long_name("Chicago/O'Hare".to_owned())
+                .with_notes("Major air travel hub.".to_owned())
+                .with_state_prov(StateProv::IL)
+                .set_mobile(false),
+            Site::new("ksea")
+                .with_long_name("Seattle".to_owned())
+                .with_notes("A coastal city with coffe and rain".to_owned())
+                .with_state_prov(StateProv::WA)
+                .set_mobile(false),
+            Site::new("kmso")
+                .with_long_name("Missoula".to_owned())
+                .with_notes("In a valley.".to_owned())
+                .with_state_prov(None)
+                .set_mobile(false),
+        ];
+
+        for site in test_sites.iter_mut() {
+            *site = arch.validate_or_add_site(site.clone())?;
+
+            assert!(site.is_valid());
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_sites_round_trip() -> Result<()> {
+        let TestArchive { tmp: _tmp, arch } =
+            create_test_archive().expect("Failed to create test archive.");
+
+        let mut test_sites = [
+            Site::new("kord")
+                .with_long_name("Chicago/O'Hare".to_owned())
+                .with_notes("Major air travel hub.".to_owned())
+                .with_state_prov(StateProv::IL)
+                .set_mobile(false),
+            Site::new("ksea")
+                .with_long_name("Seattle".to_owned())
+                .with_notes("A coastal city with coffee and rain".to_owned())
+                .with_state_prov(StateProv::WA)
+                .set_mobile(false),
+            Site::new("kmso")
+                .with_long_name("Missoula".to_owned())
+                .with_notes("In a valley.".to_owned())
+                .with_state_prov(None)
+                .set_mobile(false),
+        ];
+
+        for site in test_sites.iter_mut() {
+            *site = arch.validate_or_add_site(site.clone())?;
+        }
+
+        assert_eq!(arch.site_info("ksea")?.unwrap().short_name(), "ksea");
+        assert_eq!(arch.site_info("kord")?.unwrap().short_name(), "kord");
+        assert_eq!(arch.site_info("xyz")?, None);
+
+        let retrieved_sites = arch.sites().expect("Error retrieving sites.");
+
+        for site in retrieved_sites {
+            println!("{:#?}", site);
+            assert!(test_sites
+                .iter()
+                .find(|st| st.short_name() == site.short_name())
+                .is_some());
+        }
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Query or modify sounding type metadata
+    // ---------------------------------------------------------------------------------------------
+
+    #[test]
+    fn test_sounding_types() -> Result<()> {
         let TestArchive {
             tmp: _tmp,
             mut arch,
@@ -837,8 +995,7 @@ mod unit {
         fill_test_archive(&mut arch).expect("Error filling test archive.");
 
         let types: Vec<String> = arch
-            .sounding_types()
-            .expect("Error querying archive.")
+            .sounding_types()?
             .iter()
             .map(|t| t.source().to_owned())
             .collect();
@@ -848,6 +1005,18 @@ mod unit {
         assert!(!types.contains(&"NAM4KM".to_owned()));
         assert!(!types.contains(&"LocalWrf".to_owned()));
         assert!(!types.contains(&"Other".to_owned()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_sounding_type_info() -> Result<()> {
+        unimplemented!()
+    }
+
+    #[test]
+    fn test_set_sounding_type_info() -> Result<()> {
+        unimplemented!()
     }
 
     #[test]
@@ -875,6 +1044,59 @@ mod unit {
 
         Ok(())
     }
+
+    #[test]
+    fn test_validate_sounding_type() -> Result<()> {
+        unimplemented!()
+    }
+
+    #[test]
+    fn test_validate_or_add_sounding_type() -> Result<()> {
+        unimplemented!()
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Query or modify location metadata
+    // ---------------------------------------------------------------------------------------------
+
+    #[test]
+    fn test_all_locations() -> Result<()> {
+        unimplemented!()
+    }
+
+    #[test]
+    fn test_location_info() -> Result<()> {
+        unimplemented!()
+    }
+
+    #[test]
+    fn test_retrieve_or_add_location() -> Result<()> {
+        unimplemented!()
+    }
+
+    #[test]
+    fn test_set_location_info() -> Result<()> {
+        unimplemented!()
+    }
+
+    #[test]
+    fn test_locations_for_site_and_type() -> Result<()> {
+        unimplemented!()
+    }
+
+    #[test]
+    fn test_validate_location() -> Result<()> {
+        unimplemented!()
+    }
+
+    #[test]
+    fn test_validate_or_add_location() -> Result<()> {
+        unimplemented!()
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Query archive inventory
+    // ---------------------------------------------------------------------------------------------
 
     #[test]
     fn test_inventory() -> Result<()> {
@@ -919,81 +1141,8 @@ mod unit {
     }
 
     #[test]
-    fn test_count() {
-        let TestArchive {
-            tmp: _tmp,
-            mut arch,
-        } = create_test_archive().expect("Failed to create test archive.");
-
-        fill_test_archive(&mut arch).expect("Error filling test archive.");
-
-        // 7 and not 10 because of duplicate GFS models in the input.
-        assert_eq!(arch.count().expect("db error"), 7);
-    }
-
-    // ---------------------------------------------------------------------------------------------
-    // Add, remove, and retrieve files from the archive
-    // ---------------------------------------------------------------------------------------------
-    #[test]
-    fn test_files_round_trip() -> Result<()> {
-        let TestArchive { tmp: _tmp, arch } =
-            create_test_archive().expect("Failed to create test archive.");
-
-        let test_data = get_test_data().expect("Error loading test data.");
-
-        for (site, sounding_type, init_time, loc, file_name) in test_data {
-            let site = arch.validate_or_add_site(site)?;
-            let sounding_type = arch.validate_or_add_sounding_type(sounding_type)?;
-            let loc = arch.validate_or_add_location(loc)?;
-
-            arch.add_file(&site, &sounding_type.clone(), &loc, &init_time, &file_name)
-                .expect("Failure to add.");
-
-            let site = arch
-                .site_info(site.short_name())
-                .expect("Error retrieving site.")
-                .expect("Site not in index.");
-            let sounding_type = arch
-                .sounding_type_info(sounding_type.source())
-                .expect("Error retrieving sounding_type")
-                .expect("Sounding type not in index.");
-
-            let recovered_anal = arch
-                .retrieve(&site, &sounding_type, &init_time)
-                .expect("Failure to load.");
-
-            assert_eq!(
-                recovered_anal[0].sounding().valid_time().unwrap(),
-                init_time
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_get_most_recent_analysis() -> Result<()> {
-        let TestArchive {
-            tmp: _tmp,
-            mut arch,
-        } = create_test_archive().expect("Failed to create test archive.");
-
-        fill_test_archive(&mut arch).expect("Error filling test archive.");
-
-        let kmso = arch.site_info("kmso")?.expect("Site not in index.");
-        let snd_type = arch
-            .sounding_type_info("GFS")?
-            .expect("Sounding type not in index");
-
-        let init_time = arch
-            .most_recent_valid_time(&kmso, &snd_type)
-            .expect("Error getting valid time.");
-
-        assert_eq!(init_time, NaiveDate::from_ymd(2017, 4, 1).and_hms(18, 0, 0));
-
-        arch.most_recent_analysis(&kmso, &snd_type)
-            .expect("Failed to retrieve sounding.");
-
-        Ok(())
+    fn test_most_recent_valid_time() -> Result<()> {
+        unimplemented!()
     }
 
     #[test]
@@ -1067,6 +1216,89 @@ mod unit {
                 &NaiveDate::from_ymd(2018, 4, 1).and_hms(18, 0, 0)
             )
             .expect("Error checking for existence"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_count() {
+        let TestArchive {
+            tmp: _tmp,
+            mut arch,
+        } = create_test_archive().expect("Failed to create test archive.");
+
+        fill_test_archive(&mut arch).expect("Error filling test archive.");
+
+        // 7 and not 10 because of duplicate GFS models in the input.
+        assert_eq!(arch.count().expect("db error"), 7);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Add, remove, and retrieve files from the archive
+    // ---------------------------------------------------------------------------------------------
+    #[test]
+    fn test_files_round_trip() -> Result<()> {
+        let TestArchive { tmp: _tmp, arch } =
+            create_test_archive().expect("Failed to create test archive.");
+
+        let test_data = get_test_data().expect("Error loading test data.");
+
+        for (site, sounding_type, init_time, loc, file_name) in test_data {
+            let site = arch.validate_or_add_site(site)?;
+            let sounding_type = arch.validate_or_add_sounding_type(sounding_type)?;
+            let loc = arch.validate_or_add_location(loc)?;
+
+            arch.add_file(&site, &sounding_type.clone(), &loc, &init_time, &file_name)
+                .expect("Failure to add.");
+
+            let site = arch
+                .site_info(site.short_name())
+                .expect("Error retrieving site.")
+                .expect("Site not in index.");
+            let sounding_type = arch
+                .sounding_type_info(sounding_type.source())
+                .expect("Error retrieving sounding_type")
+                .expect("Sounding type not in index.");
+
+            let recovered_anal = arch
+                .retrieve(&site, &sounding_type, &init_time)
+                .expect("Failure to load.");
+
+            assert_eq!(
+                recovered_anal[0].sounding().valid_time().unwrap(),
+                init_time
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_export() -> Result<()> {
+        unimplemented!()
+    }
+
+    #[test]
+    fn test_get_most_recent_analysis() -> Result<()> {
+        let TestArchive {
+            tmp: _tmp,
+            mut arch,
+        } = create_test_archive().expect("Failed to create test archive.");
+
+        fill_test_archive(&mut arch).expect("Error filling test archive.");
+
+        let kmso = arch.site_info("kmso")?.expect("Site not in index.");
+        let snd_type = arch
+            .sounding_type_info("GFS")?
+            .expect("Sounding type not in index");
+
+        let init_time = arch
+            .most_recent_valid_time(&kmso, &snd_type)
+            .expect("Error getting valid time.");
+
+        assert_eq!(init_time, NaiveDate::from_ymd(2017, 4, 1).and_hms(18, 0, 0));
+
+        arch.most_recent_analysis(&kmso, &snd_type)
+            .expect("Failed to retrieve sounding.");
 
         Ok(())
     }

@@ -1,7 +1,7 @@
 //! Module for errors.
+use crate::{location::Location, site::Site, sounding_type::SoundingType};
 use sounding_analysis::AnalysisError;
-use std::error::Error;
-use std::fmt::Display;
+use std::{error::Error, fmt::Display};
 
 pub type Result<T> = std::result::Result<T, BufkitDataErr>;
 
@@ -38,6 +38,12 @@ pub enum BufkitDataErr {
     //
     /// Not enough data to complete the task.
     NotEnoughData,
+    /// No such site in the database.
+    InvalidSite(Site),
+    /// No such sounding type in the index.
+    InvalidSoundingType(SoundingType),
+    /// No such location in the index.
+    InvalidLocation(Location),
 }
 
 impl Display for BufkitDataErr {
@@ -55,6 +61,17 @@ impl Display for BufkitDataErr {
             GeneralError(msg) => write!(f, "general error forwarded: {}", msg),
 
             NotEnoughData => write!(f, "not enough data to complete task"),
+            InvalidSite(site) => write!(f, "no such site in the index: {}", site.short_name()),
+            InvalidSoundingType(st) => {
+                write!(f, "no such sounding type in the index: {}", st.source())
+            }
+            InvalidLocation(loc) => write!(
+                f,
+                "no such location in the index: lat: {}, lon: {}, elev: {}",
+                loc.latitude(),
+                loc.longitude(),
+                loc.elevation()
+            ),
         }
     }
 }
@@ -69,8 +86,11 @@ impl Error for BufkitDataErr {
             Utf8(err) => Some(err),
             Database(err) => Some(err),
             StrumError(err) => Some(err),
-            GeneralError(msg) => None,
+            GeneralError(_) => None,
             NotEnoughData => None,
+            InvalidSite(_) => None,
+            InvalidSoundingType(_) => None,
+            InvalidLocation(_) => None,
         }
     }
 }

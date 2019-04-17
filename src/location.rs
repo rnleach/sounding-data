@@ -3,7 +3,7 @@ use crate::{
     site::Site,
     sounding_type::SoundingType,
 };
-use rusqlite::{types::ToSql, Connection, OptionalExtension, Row, NO_PARAMS};
+use rusqlite::{types::ToSql, Connection, Row, NO_PARAMS};
 
 /// A geographic location.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -188,50 +188,26 @@ pub(crate) fn retrieve_or_add_location(
     }
 }
 
-/// Insert or update the location information in the database.
+/// Update the location information in the index.
 #[inline]
-pub(crate) fn insert_or_update_location(db: &Connection, location: Location) -> Result<Location> {
-    if let Some(row_id) = db
-        .query_row(
-            "
-                SELECT rowid 
-                FROM locations 
-                WHERE latitude = ?1 AND longitude = ?2 and elevation_meters = ?3
-            ",
-            &[
-                &((location.latitude * 1_000_000.0) as i64),
-                &((location.longitude * 1_000_000.0) as i64),
-                &location.elevation_m as &ToSql,
-            ],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?
-    {
-        // row already exists - so update
-        db.execute(
-            "
+pub(crate) fn update_location(db: &Connection, location: Location) -> Result<Location> {
+    db.execute(
+        "
                 UPDATE locations
                 SET (tz_offset_seconds)
                 = (?2)
                 WHERE id = ?1
             ",
-            &[&location.id, &location.tz_offset as &ToSql],
-        )?;
+        &[&location.id, &location.tz_offset as &ToSql],
+    )?;
 
-        Ok(Location {
-            id: row_id,
-            ..location
-        })
-    } else {
-        // insert
-        insert_location_(
-            db,
-            location.latitude,
-            location.longitude,
-            location.elevation_m,
-            location.tz_offset,
-        )
-    }
+    retrieve_location(
+        db,
+        location.latitude,
+        location.longitude,
+        location.elevation_m,
+    )
+    .map(|opt| opt.unwrap())
 }
 
 /// Insert the location information in the index.

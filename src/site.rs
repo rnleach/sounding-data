@@ -1,5 +1,5 @@
 use crate::errors::{BufkitDataErr, Result};
-use rusqlite::{types::ToSql, Connection, OptionalExtension, Row, NO_PARAMS};
+use rusqlite::{types::ToSql, Connection, Row, NO_PARAMS};
 use std::str::FromStr;
 use strum::AsStaticRef;
 use strum_macros::{AsStaticStr, EnumIter, EnumString};
