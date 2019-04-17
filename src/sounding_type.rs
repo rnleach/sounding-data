@@ -1,4 +1,7 @@
-use crate::{errors::{Result, BufkitDataErr}, site::Site};
+use crate::{
+    errors::{BufkitDataErr, Result},
+    site::Site,
+};
 use rusqlite::{types::ToSql, Connection, OptionalExtension, Row, NO_PARAMS};
 use std::str::FromStr;
 use strum::AsStaticRef;
@@ -65,7 +68,7 @@ impl SoundingType {
 
     /// `true` if this type has been verified to be in the archive index.
     #[inline]
-    pub fn is_known(&self) -> bool {
+    pub fn is_valid(&self) -> bool {
         self.id > -0
     }
 
@@ -107,7 +110,7 @@ pub(crate) fn retrieve_sounding_type(
         ",
         &[sounding_type_as_str],
         parse_row_to_sounding_type,
-    ){
+    ) {
         Ok(Ok(sounding_type)) => Ok(Some(sounding_type)),
         Ok(Err(err)) => Err(err),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -115,60 +118,53 @@ pub(crate) fn retrieve_sounding_type(
     }
 }
 
-/// Insert or update the sounding type information in the database.
+/// Update the sounding type information in the index.
 #[inline]
-pub(crate) fn insert_or_update_sounding_type(
+pub(crate) fn update_sounding_type(
     db: &Connection,
     sounding_type: SoundingType,
 ) -> Result<SoundingType> {
-    if let Some(row_id) = db
-        .query_row(
-            "SELECT rowid FROM types where type = ?1",
-            &[sounding_type.source()],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?
-    {
-        // row already exists - so update
-        db.execute(
-            "
+    db.execute(
+        "
                 UPDATE types
                 SET (interval, observed)
                 = (?2, ?3)
                 WHERE type = ?1
             ",
-            &[
-                &sounding_type.source,
-                &sounding_type.hours_between as &ToSql,
-                &sounding_type.observed,
-            ],
-        )?;
+        &[
+            &sounding_type.source,
+            &sounding_type.hours_between as &ToSql,
+            &sounding_type.observed,
+        ],
+    )?;
 
-        Ok(SoundingType {
-            id: row_id,
-            ..sounding_type
-        })
-    } else {
-        // insert
-        db.execute(
-            "
-                INSERT INTO types(type, file_type, interval, observed) 
-                VALUES(?1, ?2, ?3, ?4)
-            ",
-            &[
-                &sounding_type.source,
-                &sounding_type.file_type.as_static() as &ToSql,
-                &sounding_type.hours_between as &ToSql,
-                &sounding_type.observed,
-            ],
-        )?;
+    retrieve_sounding_type(db, &sounding_type.source).map(|opt| opt.unwrap())
+}
 
-        let row_id = db.last_insert_rowid();
-        Ok(SoundingType {
-            id: row_id,
-            ..sounding_type
-        })
-    }
+/// Insert the `SoundingType` information in the index.
+#[inline]
+pub(crate) fn insert_sounding_type(
+    db: &Connection,
+    sounding_type: SoundingType,
+) -> Result<SoundingType> {
+    db.execute(
+        "
+            INSERT INTO types(type, file_type, interval, observed) 
+            VALUES(?1, ?2, ?3, ?4)
+        ",
+        &[
+            &sounding_type.source,
+            &sounding_type.file_type.as_static() as &ToSql,
+            &sounding_type.hours_between as &ToSql,
+            &sounding_type.observed,
+        ],
+    )?;
+
+    let row_id = db.last_insert_rowid();
+    Ok(SoundingType {
+        id: row_id,
+        ..sounding_type
+    })
 }
 
 /// Get a list of sites from the index
@@ -181,8 +177,9 @@ pub(crate) fn all_sounding_types(db: &Connection) -> Result<Vec<SoundingType>> {
         ",
     )?;
 
-    let vals: Result<Vec<SoundingType>> =
-        stmt.query_and_then(NO_PARAMS, parse_row_to_sounding_type)?.collect();
+    let vals: Result<Vec<SoundingType>> = stmt
+        .query_and_then(NO_PARAMS, parse_row_to_sounding_type)?
+        .collect();
 
     vals
 }
@@ -241,7 +238,6 @@ pub enum FileType {
 mod unit {
     use super::*;
     use rusqlite::{Connection, OpenFlags};
-    use std::error::Error;
     use tempdir::TempDir;
 
     #[test]
@@ -255,7 +251,7 @@ mod unit {
 
         db_conn.execute_batch(include_str!("create_index.sql"))?;
 
-        insert_or_update_sounding_type(
+        insert_sounding_type(
             &db_conn,
             SoundingType::new_model("GFS3", FileType::BUFKIT, 6),
         )?;

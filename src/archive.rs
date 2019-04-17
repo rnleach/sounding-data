@@ -4,8 +4,8 @@ use crate::{
     errors::{BufkitDataErr, Result},
     inventory::Inventory,
     location::{insert_or_update_location, Location},
-    site::{insert_or_update_site, Site},
-    sounding_type::{insert_or_update_sounding_type, FileType, SoundingType},
+    site::Site,
+    sounding_type::{FileType, SoundingType},
 };
 use chrono::NaiveDateTime;
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
@@ -118,25 +118,6 @@ impl Archive {
         Ok((files_in_index_but_not_on_file_system, files_not_in_index))
     }
 
-    // /// Given a list of files, remove them from the index, but NOT the file system.
-    // fn remove_from_index(&self, file_names: &[String]) -> Result<()> {
-    //     // TODO: implement
-    //     unimplemented!()
-    // }
-
-    // /// Given a list of files, remove them from the file system. This assumes they have already been
-    // /// removed from the index (or never existed there.)
-    // fn remove_from_data_store(&self, file_names: &[String]) -> Result<()> {
-    //     // TODO: implement
-    //     unimplemented!()
-    // }
-
-    // /// Given a list of files, attempt to parse the file names and add them to the index.
-    // fn add_to_index(&self, file_names: &[String]) -> Result<()> {
-    //     // TODO: implement
-    //     unimplemented!()
-    // }
-
     // ---------------------------------------------------------------------------------------------
     // The file system aspects of the archive, e.g. the root directory of the archive
     // ---------------------------------------------------------------------------------------------
@@ -147,86 +128,127 @@ impl Archive {
     // Query or modify site metadata
     // ---------------------------------------------------------------------------------------------
 
-    /// Retrieve a list of sites in the archive.
+    /// Retrieve a list of all the `Site`s in the archive.
     pub fn sites(&self) -> Result<Vec<Site>> {
         crate::site::all_sites(&self.db_conn)
     }
 
-    /// Retrieve the information about a single site.
+    /// Retrieve the information about a single `Site` with the supplied `short_name`.
+    ///
+    /// Returns `Ok(None)` if none exists in the archive, and returns `Ok(Some(_))` with the
+    /// corresponding `Site` object if one does exist.
     pub fn site_info(&self, short_name: &str) -> Result<Option<Site>> {
         crate::site::retrieve_site(&self.db_conn, short_name)
     }
 
-    /// Insert a new `Site` or modify an existing `Site`'s values.
+    /// Modify an existing `Site`'s values.
+    ///
+    /// The supplied site need not be validated, the returned site will be. It is an error if there
+    /// is not a site in the index with the same `short_name` to modify.
     pub fn set_site_info(&self, site: Site) -> Result<Site> {
-        crate::site::insert_or_update_site(&self.db_conn, site)
+        crate::site::update_site(&self.db_conn, site)
     }
 
-    /// Check if a site already exists
-    pub fn site_exists(&self, short_name: &str) -> Result<bool> {
-        let number: i32 = self.db_conn.query_row(
-            "SELECT COUNT(*) FROM sites WHERE short_name = ?1",
-            &[short_name],
-            |row| row.get(0),
-        )?;
+    /// Validate that this `Site` is in the index.
+    ///
+    /// Any object returned in an `Ok(_)` from this method will return true from the `.is_valid()`
+    /// method.
+    pub fn validate_site(&self, site: Site) -> Result<Site> {
+        unimplemented!()
+    }
 
-        debug_assert!(number < 2); // short_name for sites should be unique in the db
-        Ok(number == 1) 
+    /// Validate that this `Site` is in the index, if not, insert it into the index.
+    ///
+    /// Any object returned in an `Ok(_)` from this method will return true from the `.is_valid()`
+    /// method.
+    pub fn validate_or_add_site(&self, site: Site) -> Result<Site> {
+        if site.is_valid() {
+            Ok(site)
+        } else {
+            if let Some(retrieved_site) =
+                crate::site::retrieve_site(&self.db_conn, site.short_name())?
+            {
+                Ok(retrieved_site)
+            } else {
+                crate::site::insert_site(&self.db_conn, site)
+            }
+        }
     }
 
     // ---------------------------------------------------------------------------------------------
     // Query or modify sounding type metadata
     // ---------------------------------------------------------------------------------------------
 
-    /// Get a list of sounding types in the archive.
+    /// Retrieve a list of all the `SoundingType`s in the archive.
     pub fn sounding_types(&self) -> Result<Vec<SoundingType>> {
         crate::sounding_type::all_sounding_types(&self.db_conn)
     }
 
-    /// Get the sounding type object for this string. The string is the same as the one returned by
-    /// the `source()` method of a `SoundingType` object.
-    pub fn sounding_type_info(
-        &self,
-        sounding_type: &str,
-    ) -> Result<Option<SoundingType>> {
+    /// Retrieve the information about a single `SoundingType` with the supplied description, which
+    /// is the same as the result from its `source()` method.
+    ///
+    /// Returns `Ok(None)` if none exists in the archive, and returns `Ok(Some(_))` with the
+    /// corresponding `SoundingType` object if one does exist.
+    pub fn sounding_type_info(&self, sounding_type: &str) -> Result<Option<SoundingType>> {
         crate::sounding_type::retrieve_sounding_type(&self.db_conn, sounding_type)
     }
 
-    /// Insert a new sounding type or modify an existing `SoundingType`'s values.
+    /// Modify an existing `SoundingType`'s values.
     ///
-    /// Returns the sounding type with the value of the `.id()` method updated.
-    pub fn set_sounding_type_info(&self, sounding_type: SoundingType) -> Result<SoundingType>{
-        crate::sounding_type::insert_or_update_sounding_type(&self.db_conn, sounding_type)
+    /// The supplied sounding type need not be validated, the returned one will be. It is an error
+    /// if there is not a sounding type in the index with the same `.source()` to modify.
+    pub fn set_sounding_type_info(&self, sounding_type: SoundingType) -> Result<SoundingType> {
+        crate::sounding_type::update_sounding_type(&self.db_conn, sounding_type)
     }
 
-    /// Get a list of sounding types in the archive for this site.
+    /// Get a list of `SoundingType`s in the archive for this `site`.
     pub fn sounding_types_for_site(&self, site: &Site) -> Result<Vec<SoundingType>> {
         debug_assert!(site.id() > 0);
         crate::sounding_type::all_sounding_types_for_site(&self.db_conn, site)
     }
 
-    /// Check to see if a sounding type such as this already exists in the archive.
-    pub fn sounding_type_exists(&self, sounding_type_str: &str) -> Result<bool> {
-        let number: i32 = self.db_conn.query_row(
-            "SELECT COUNT(*) FROM types WHERE source = ?1",
-            &[sounding_type_str],
-            |row| row.get(0),
-        )?;
+    /// Validate that this `SoundingType` is in the index.
+    ///
+    /// Any object returned in an `Ok(_)` from this method will return true from the `.is_valid()`
+    /// method.
+    pub fn validate_sounding_type(&self, sounding_type: SoundingType) -> Result<SoundingType> {
+        unimplemented!()
+    }
 
-        debug_assert!(number < 2); // source for sites should be unique in the db
-        Ok(number == 1) 
+    /// Validate that this `SoundingType` is in the index, if not, add it to the index.
+    ///
+    /// Any object returned in an `Ok(_)` from this method will return true from the `.is_valid()`
+    /// method.
+    pub fn validate_or_add_sounding_type(
+        &self,
+        sounding_type: SoundingType,
+    ) -> Result<SoundingType> {
+        if sounding_type.is_valid() {
+            Ok(sounding_type)
+        } else {
+            if let Some(retrieved_st) =
+                crate::sounding_type::retrieve_sounding_type(&self.db_conn, sounding_type.source())?
+            {
+                Ok(retrieved_st)
+            } else {
+                crate::sounding_type::insert_sounding_type(&self.db_conn, sounding_type)
+            }
+        }
     }
 
     // ---------------------------------------------------------------------------------------------
     // Query or modify location metadata
     // ---------------------------------------------------------------------------------------------
 
-    /// Get a list of locations in the archive.
+    /// Retrieve a list of all the `Location`s in the archive.
     pub fn all_locations(&self) -> Result<Vec<Location>> {
         crate::location::all_locations(&self.db_conn)
     }
 
     /// Get the `Location` object for these coordinates.
+    ///
+    /// If there were no errors while querying the index, this will return an `Ok(None)` meaning
+    /// that no errors occurred, but there was matching locaiton in the index.
     pub fn location_info(
         &self,
         latitude: f64,
@@ -236,43 +258,63 @@ impl Archive {
         crate::location::retrieve_location(&self.db_conn, latitude, longitude, elevation_m)
     }
 
-    /// Insert a new `Location` or modify an existing `Location`'s values.
-    ///
-    /// Returns the location with the value of the `.id()` method updated.
-    pub fn set_location_info(
-        &self, location: Location,
+    /// Retrieve the `Location` object associated with these coordinates, or insert a new one into
+    /// the index.
+    pub fn retrieve_or_add_location(
+        &self,
+        latitude: f64,
+        longitude: f64,
+        elevation_m: i32,
     ) -> Result<Location> {
-        crate::location::insert_or_update_location(&self.db_conn, location)
+        crate::location::retrieve_or_add_location(&self.db_conn, latitude, longitude, elevation_m)
+    }
+
+    /// Modify an existing `Location`'s values.
+    ///
+    /// The supplied location need not be validated, the returned one will be. It is an error if
+    /// there is not a matching `Location` in the index with the same coordinates to modify.
+    /// Basically you can only modify the time zone offset information.
+    pub fn set_location_info(&self, location: Location) -> Result<Location> {
+        unimplemented!()
     }
 
     /// Get a list of `Location`s in the archive for this site.
-    pub fn locations_for_site_and_type(&self, site: &Site, sounding_type: &SoundingType) -> Result<Vec<Location>> {
+    pub fn locations_for_site_and_type(
+        &self,
+        site: &Site,
+        sounding_type: &SoundingType,
+    ) -> Result<Vec<Location>> {
         debug_assert!(site.id() > 0);
         crate::location::all_locations_for_site_and_type(&self.db_conn, site, sounding_type)
     }
 
-    /// Check to see if a sounding type such as this already exists in the archive.
-    pub fn location_exists(&self,
-        latitude: f64,
-        longitude: f64,
-        elevation_m: i32,
-    ) -> Result<bool> {
-        let number: i32 = self.db_conn.query_row(
-            "
-                SELECT COUNT(*) 
-                FROM locations 
-                WHERE latitude = ?1 AND longitude = ?2 AND elevation_meters = ?3
-            ",
-            &[
-                &((latitude * 1_000_000.0) as i64),
-                &((longitude * 1_000_000.0) as i64),
-                &elevation_m as &ToSql,
-            ],
-            |row| row.get(0),
-        )?;
+    /// Validate that this `Location` is in the index.
+    ///
+    /// Any object returned in an `Ok(_)` from this method will return true from the `.is_valid()`
+    /// method.
+    pub fn validate_location(&self, location: Location) -> Result<bool> {
+        unimplemented!()
+    }
 
-        debug_assert!(number < 2); // should only be one location with these values
-        Ok(number == 1) 
+    /// Validate that this `Location` is in the index, if not, add it to the index.
+    ///
+    /// Any object returned in an `Ok(_)` from this method will return true from the `.is_valid()`
+    /// method.
+    pub fn validate_or_add_location(&self, location: Location) -> Result<Location> {
+        if location.is_valid() {
+            Ok(location)
+        } else {
+            if let Some(retrieved_loc) = crate::location::retrieve_location(
+                &self.db_conn,
+                location.latitude(),
+                location.longitude(),
+                location.elevation(),
+            )? {
+                Ok(retrieved_loc)
+            } else {
+                crate::location::insert_location(&self.db_conn, location)
+            }
+        }
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -351,10 +393,9 @@ impl Archive {
         init_time: &NaiveDateTime,
         file_name: &str,
     ) -> Result<()> {
-
-        debug_assert!(site.id() > 0);
-        debug_assert!(sounding_type.id() > 0);
-        debug_assert!(location.id() > 0);
+        debug_assert!(site.is_valid());
+        debug_assert!(sounding_type.is_valid());
+        debug_assert!(location.is_valid());
 
         let fname: String = self.compressed_file_name(&site, &sounding_type, init_time);
 
@@ -377,10 +418,7 @@ impl Archive {
             ],
         )?;
 
-        // Open the file in binary mode and compress it into a file with the above found name
-
-        // Ok(())
-        unimplemented!()
+        Ok(())
     }
 
     fn get_file_name_for(
@@ -413,11 +451,7 @@ impl Archive {
         Ok(buf)
     }
 
-    fn decode_data(
-        buf: &[u8],
-        description: &str,
-        ftype: FileType,
-    ) -> Result<Vec<Analysis>> {
+    fn decode_data(buf: &[u8], description: &str, ftype: FileType) -> Result<Vec<Analysis>> {
         match ftype {
             FileType::BUFKIT => {
                 let bufkit_str = from_utf8(&buf)?;
@@ -557,8 +591,7 @@ mod unit {
     }
 
     // Function to fetch a list of test files.
-    fn get_test_data(
-    ) -> Result<Vec<(Site, SoundingType, NaiveDateTime, Location, String)>> {
+    fn get_test_data() -> Result<Vec<(Site, SoundingType, NaiveDateTime, Location, String)>> {
         let path = PathBuf::new().join("example_data");
 
         let files = read_dir(path)?
@@ -621,18 +654,12 @@ mod unit {
         let test_data = get_test_data().expect("Error loading test data.");
 
         for (site, sounding_type, init_time, loc, file_name) in test_data {
-            let site = arch.set_site_info(site)?;
-            let sounding_type = arch.set_sounding_type_info(sounding_type)?;
-            arch.add_file(
-                &site,
-                &sounding_type.clone(),
-                &loc,
-                &init_time,
-                &file_name,
-            )
-            .expect("Failure to add.");
+            let site = arch.validate_or_add_site(site)?;
+            let sounding_type = arch.validate_or_add_sounding_type(sounding_type)?;
+            let loc = arch.validate_or_add_location(loc)?;
+            arch.add_file(&site, &sounding_type.clone(), &loc, &init_time, &file_name)?;
         }
-        
+
         Ok(())
     }
 
@@ -658,7 +685,7 @@ mod unit {
     // Query or modify site metadata
     // ---------------------------------------------------------------------------------------------
     #[test]
-    fn test_sites_round_trip() {
+    fn test_sites_round_trip() -> Result<()> {
         let TestArchive { tmp: _tmp, arch } =
             create_test_archive().expect("Failed to create test archive.");
 
@@ -681,12 +708,12 @@ mod unit {
         ];
 
         for site in test_sites.iter_mut() {
-            *site = arch.set_site_info(site.clone()).expect("Error adding site.");
+            *site = arch.validate_or_add_site(site.clone())?;
         }
 
-        assert!(arch.site_exists("ksea").expect("Error checking existence"));
-        assert!(arch.site_exists("kord").expect("Error checking existence"));
-        assert!(!arch.site_exists("xyz").expect("Error checking existence"));
+        assert_eq!(arch.site_info("ksea")?.unwrap().short_name(), "ksea");
+        assert_eq!(arch.site_info("kord")?.unwrap().short_name(), "kord");
+        assert_eq!(arch.site_info("xyz")?, None);
 
         let retrieved_sites = arch.sites().expect("Error retrieving sites.");
 
@@ -697,10 +724,11 @@ mod unit {
                 .find(|st| st.short_name() == site.short_name())
                 .is_some());
         }
+        Ok(())
     }
 
     #[test]
-    fn test_get_site_info() {
+    fn test_site_info() {
         let TestArchive { tmp: _tmp, arch } =
             create_test_archive().expect("Failed to create test archive.");
 
@@ -723,13 +751,15 @@ mod unit {
         ];
 
         for site in test_sites.iter_mut() {
-            *site = arch.set_site_info(site.clone()).expect("Error adding site.");
+            *site = arch
+                .validate_or_add_site(site.clone())
+                .expect("Error adding site.");
         }
 
         for site in test_sites.iter() {
             let retr_site = arch.site_info(site.short_name()).unwrap().unwrap();
 
-            assert!(retr_site.id() > 0);
+            assert!(retr_site.is_valid());
             assert_eq!(site.short_name(), retr_site.short_name());
             assert_eq!(site.long_name(), retr_site.long_name());
             assert_eq!(site.state_prov(), retr_site.state_prov());
@@ -761,7 +791,9 @@ mod unit {
         ];
 
         for site in test_sites.iter_mut() {
-            *site = arch.set_site_info(site.clone()).expect("Error adding site.");
+            *site = arch
+                .validate_or_add_site(site.clone())
+                .expect("Error adding site.");
         }
 
         let retr_site = arch.site_info("kmso").unwrap().unwrap();
@@ -776,9 +808,11 @@ mod unit {
             .with_state_prov(None)
             .set_mobile(false);
 
-        arch.set_site_info(zootown.clone()).expect("Error updating site.");
+        arch.set_site_info(zootown.clone())
+            .expect("Error updating site.");
 
         let retr_site = arch.site_info("kmso").unwrap().unwrap();
+        assert!(retr_site.is_valid());
         assert_eq!(retr_site.short_name(), test_sites[2].short_name());
         assert_ne!(retr_site.long_name(), test_sites[2].long_name());
         assert_ne!(retr_site.notes(), test_sites[2].notes());
@@ -852,8 +886,12 @@ mod unit {
         fill_test_archive(&mut arch).expect("Error filling test archive.");
 
         let site = arch.site_info("kmso")?.expect("No such site.");
-        let gfs = arch.sounding_type_info("GFS")?.expect("No such sounding type.");
-        let nam = arch.sounding_type_info("NAM")?.expect("No such sounding type.");
+        let gfs = arch
+            .sounding_type_info("GFS")?
+            .expect("No such sounding type.");
+        let nam = arch
+            .sounding_type_info("NAM")?
+            .expect("No such sounding type.");
 
         let first = NaiveDate::from_ymd(2017, 4, 1).and_hms(0, 0, 0);
         let last = NaiveDate::from_ymd(2017, 4, 1).and_hms(18, 0, 0);
@@ -868,14 +906,14 @@ mod unit {
         assert_eq!(gfs_locations[0].latitude(), 46.92);
         assert_eq!(gfs_locations[0].longitude(), -114.08);
         assert_eq!(gfs_locations[0].elevation(), 972);
-        assert!(gfs_locations[0].is_known());
+        assert!(gfs_locations[0].is_valid());
 
         let nam_locations = inv.locations(&nam);
         assert_eq!(nam_locations.len(), 1);
         assert_eq!(nam_locations[0].latitude(), 46.87);
         assert_eq!(nam_locations[0].longitude(), -114.16);
         assert_eq!(nam_locations[0].elevation(), 1335);
-        assert!(nam_locations[0].is_known());
+        assert!(nam_locations[0].is_valid());
 
         Ok(())
     }
@@ -904,16 +942,12 @@ mod unit {
         let test_data = get_test_data().expect("Error loading test data.");
 
         for (site, sounding_type, init_time, loc, file_name) in test_data {
-            let site = arch.set_site_info(site)?;
-            let sounding_type = arch.set_sounding_type_info(sounding_type)?;
-            arch.add_file(
-                &site,
-                &sounding_type.clone(),
-                &loc,
-                &init_time,
-                &file_name,
-            )
-            .expect("Failure to add.");
+            let site = arch.validate_or_add_site(site)?;
+            let sounding_type = arch.validate_or_add_sounding_type(sounding_type)?;
+            let loc = arch.validate_or_add_location(loc)?;
+
+            arch.add_file(&site, &sounding_type.clone(), &loc, &init_time, &file_name)
+                .expect("Failure to add.");
 
             let site = arch
                 .site_info(site.short_name())
@@ -946,7 +980,9 @@ mod unit {
         fill_test_archive(&mut arch).expect("Error filling test archive.");
 
         let kmso = arch.site_info("kmso")?.expect("Site not in index.");
-        let snd_type = arch.sounding_type_info("GFS")?.expect("Sounding type not in index");
+        let snd_type = arch
+            .sounding_type_info("GFS")?
+            .expect("Sounding type not in index");
 
         let init_time = arch
             .most_recent_valid_time(&kmso, &snd_type)
@@ -1046,7 +1082,9 @@ mod unit {
 
         let init_time = NaiveDate::from_ymd(2017, 4, 1).and_hms(0, 0, 0);
         let kmso = arch.site_info("kmso")?.expect("No such site.");
-        let snd_type = arch.sounding_type_info("GFS")?.expect("No such sounding type.");
+        let snd_type = arch
+            .sounding_type_info("GFS")?
+            .expect("No such sounding type.");
 
         assert!(arch
             .file_exists(&kmso, &snd_type, &init_time)

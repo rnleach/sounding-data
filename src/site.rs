@@ -1,4 +1,4 @@
-use crate::errors::{Result, BufkitDataErr};
+use crate::errors::{BufkitDataErr, Result};
 use rusqlite::{types::ToSql, Connection, OptionalExtension, Row, NO_PARAMS};
 use std::str::FromStr;
 use strum::AsStaticRef;
@@ -110,7 +110,7 @@ impl Site {
 
     /// Get whether or not the site has been verified as being in the database.
     #[inline]
-    pub fn is_known(&self) -> bool {
+    pub fn is_valid(&self) -> bool {
         self.id > 0 // sqlite starts at row id = 1
     }
 
@@ -145,54 +145,47 @@ pub(crate) fn retrieve_site(db: &Connection, short_name: &str) -> Result<Option<
     }
 }
 
-/// Insert or update the site information in the database.
+/// Update the site information in the index.
 #[inline]
-pub(crate) fn insert_or_update_site(db: &Connection, site: Site) -> Result<Site> {
-    if let Some(row_id) = db
-        .query_row(
-            "SELECT rowid FROM sites WHERE short_name = ?1",
-            &[site.short_name()],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?
-    {
-        // row already exists - so update
-        db.execute(
-            "
-                UPDATE sites 
-                SET (long_name, state, notes, mobile_sounding_site)
-                = (?2, ?3, ?4, ?5)
-                WHERE short_name = ?1
-            ",
-            &[
-                &site.short_name,
-                &site.long_name as &ToSql,
-                &site.state_prov().map(|st| st.as_static()) as &ToSql,
-                &site.notes(),
-                &site.is_mobile(),
-            ],
-        )?;
+pub(crate) fn update_site(db: &Connection, site: Site) -> Result<Site> {
+    db.execute(
+        "
+            UPDATE sites 
+            SET (long_name, state, notes, mobile_sounding_site)
+            = (?2, ?3, ?4, ?5)
+            WHERE short_name = ?1
+        ",
+        &[
+            &site.short_name,
+            &site.long_name as &ToSql,
+            &site.state_prov().map(|st| st.as_static()) as &ToSql,
+            &site.notes(),
+            &site.is_mobile(),
+        ],
+    )?;
 
-        Ok(Site { id: row_id, ..site })
-    } else {
-        // insert
-        db.execute(
-            "
-                INSERT INTO sites(short_name, long_name, state, notes, mobile_sounding_site) 
-                VALUES(?1, ?2, ?3, ?4, ?5)
-            ",
-            &[
-                &site.short_name,
-                &site.long_name as &ToSql,
-                &site.state_prov().map(|st| st.as_static()) as &ToSql,
-                &site.notes(),
-                &site.is_mobile(),
-            ],
-        )?;
+    retrieve_site(db, &site.short_name).map(|opt| opt.unwrap())
+}
 
-        let row_id = db.last_insert_rowid();
-        Ok(Site { id: row_id, ..site })
-    }
+/// Insert the site information in the database.
+#[inline]
+pub(crate) fn insert_site(db: &Connection, site: Site) -> Result<Site> {
+    db.execute(
+        "
+            INSERT INTO sites(short_name, long_name, state, notes, mobile_sounding_site) 
+            VALUES(?1, ?2, ?3, ?4, ?5)
+        ",
+        &[
+            &site.short_name,
+            &site.long_name as &ToSql,
+            &site.state_prov().map(|st| st.as_static()) as &ToSql,
+            &site.notes(),
+            &site.is_mobile(),
+        ],
+    )?;
+
+    let row_id = db.last_insert_rowid();
+    Ok(Site { id: row_id, ..site })
 }
 
 /// Get a list of sites from the index
@@ -205,8 +198,7 @@ pub(crate) fn all_sites(db: &Connection) -> Result<Vec<Site>> {
         ",
     )?;
 
-    let vals: Result<Vec<Site>> =
-        stmt.query_and_then(NO_PARAMS, parse_row_to_site)?.collect();
+    let vals: Result<Vec<Site>> = stmt.query_and_then(NO_PARAMS, parse_row_to_site)?.collect();
 
     vals
 }
@@ -304,7 +296,7 @@ pub enum StateProv {
 mod unit {
     use super::*;
     use rusqlite::{Connection, OpenFlags};
-    use std::{str::FromStr};
+    use std::str::FromStr;
     use strum::{AsStaticRef, IntoEnumIterator};
     use tempdir::TempDir;
 
@@ -362,7 +354,7 @@ mod unit {
         )?;
         db_conn.execute_batch(include_str!("create_index.sql"))?;
 
-        insert_or_update_site(&db_conn, Site::new("kmso"))?;
+        insert_site(&db_conn, Site::new("kmso"))?;
         let site = dbg!(retrieve_site(&db_conn, "kmso"))?.unwrap();
 
         assert_eq!(site.short_name(), "kmso");

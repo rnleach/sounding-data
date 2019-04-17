@@ -60,15 +60,15 @@ impl Display for BufkitDataErr {
 }
 
 impl Error for BufkitDataErr {
-    fn source(&self)-> Option<&(dyn Error + 'static)>{
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
         use crate::BufkitDataErr::*;
 
         match self {
             SoundingAnalysis(err) => Some(err),
-            Io(err) =>  Some(err),
-            Utf8(err) =>  Some(err),
-            Database(err) =>  Some(err),
-            StrumError(err) =>  Some(err),
+            Io(err) => Some(err),
+            Utf8(err) => Some(err),
+            Database(err) => Some(err),
+            StrumError(err) => Some(err),
             GeneralError(msg) => None,
             NotEnoughData => None,
         }
