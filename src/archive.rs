@@ -708,16 +708,42 @@ mod unit {
     }
 
     #[test]
-    fn test_check() {
-        let TestArchive { tmp: _, arch } =
+    fn test_check() -> Result<()> {
+        let TestArchive { tmp, mut arch } =
             create_test_archive().expect("Failed to create test archive.");
+        fill_test_archive(&mut arch).expect("Error filling test archive.");
 
-        // Delete a file from the archive
-        // Add an extra file to the archive
+        // Rename all files with "NAM" in them
+        let files_dir = tmp.path().join("files");
+        std::fs::read_dir(files_dir)?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains("NAM"))
+            .for_each(|entry| {
+                let mut fname = entry.path().to_string_lossy().to_string();
+                let start = fname.find("NAM").unwrap();
+                let end = start + 3;
+                fname.replace_range(start..end, "NAMM");
+                std::fs::rename(entry.path(), fname).unwrap();
+            });
 
-        let (_missing_files, _extra_files) = arch.check().unwrap();
+        let (missing_files, extra_files) = dbg!(arch.check().unwrap());
 
-        assert!(false, "Test not yet implemented.");
+        assert_eq!(missing_files.len(), 3);
+        assert_eq!(missing_files.len(), extra_files.len());
+
+        for fname in missing_files {
+            assert!(fname.contains("_NAM_"));
+            assert!(!fname.contains("_NAMM_"));
+            assert!(!fname.contains("_GFS_"));
+        }
+
+        for fname in extra_files {
+            assert!(fname.contains("_NAMM_"));
+            assert!(!fname.contains("_NAM_"));
+            assert!(!fname.contains("_GFS_"));
+        }
+
+        Ok(())
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -788,9 +814,13 @@ mod unit {
         ];
 
         for site in test_sites.iter_mut() {
+            assert!(!site.is_valid());
+
             *site = arch
                 .validate_or_add_site(site.clone())
                 .expect("Error adding site.");
+
+            assert!(site.is_valid());
         }
 
         for site in test_sites.iter() {
@@ -1011,12 +1041,99 @@ mod unit {
 
     #[test]
     fn test_sounding_type_info() -> Result<()> {
-        unimplemented!()
+        let TestArchive { tmp: _tmp, arch } =
+            create_test_archive().expect("Failed to create test archive.");
+
+        let mut test_sts = [
+            SoundingType::new("GFS", false, FileType::BUFKIT, 6),
+            SoundingType::new("NAM", false, FileType::BUFKIT, 6),
+            SoundingType::new("NamNest", false, FileType::BUFKIT, 6),
+            SoundingType::new("Incident", true, FileType::BUFR, None),
+            SoundingType::new("SREF", false, FileType::BUFKIT, 6),
+        ];
+
+        for st in test_sts.iter_mut() {
+            assert!(!st.is_valid());
+
+            *st = arch
+                .validate_or_add_sounding_type(st.clone())
+                .expect("Error adding sounding type.");
+
+            assert!(st.is_valid());
+        }
+
+        for st in test_sts.iter() {
+            let retr_st = arch.sounding_type_info(st.source()).unwrap().unwrap();
+
+            assert!(retr_st.is_valid());
+            assert_eq!(st.source(), retr_st.source());
+            assert_eq!(st.is_modeled(), retr_st.is_modeled());
+            assert_eq!(st.is_observed(), retr_st.is_observed());
+            assert_eq!(
+                st.hours_between_initializations(),
+                retr_st.hours_between_initializations()
+            );
+            assert_eq!(st.file_type(), retr_st.file_type());
+        }
+
+        Ok(())
     }
 
     #[test]
     fn test_set_sounding_type_info() -> Result<()> {
-        unimplemented!()
+        let TestArchive { tmp: _tmp, arch } =
+            create_test_archive().expect("Failed to create test archive.");
+
+        let mut test_sts = [
+            SoundingType::new("GFS", false, FileType::BUFKIT, 6),
+            SoundingType::new("NAM", false, FileType::BUFKIT, 6),
+            SoundingType::new("NamNest", false, FileType::BUFKIT, 6),
+            SoundingType::new("Incident", true, FileType::BUFR, None),
+            SoundingType::new("SREF", false, FileType::BUFKIT, 6),
+        ];
+
+        for st in test_sts.iter_mut() {
+            *st = arch
+                .validate_or_add_sounding_type(st.clone())
+                .expect("Error adding sounding type.");
+        }
+
+        let retr_st = arch.sounding_type_info("SREF").unwrap().unwrap();
+        assert_eq!(retr_st.source(), test_sts[4].source());
+        assert_eq!(retr_st.is_modeled(), test_sts[4].is_modeled());
+        assert_eq!(retr_st.is_observed(), test_sts[4].is_observed());
+        assert_eq!(
+            retr_st.hours_between_initializations(),
+            test_sts[4].hours_between_initializations()
+        );
+        assert_eq!(retr_st.file_type(), test_sts[4].file_type());
+
+        let sref = SoundingType::new("SREF", false, FileType::BUFKIT, None);
+
+        arch.set_sounding_type_info(sref.clone())
+            .expect("Error updating sounding type.");
+
+        let retr_st = arch.sounding_type_info("SREF").unwrap().unwrap();
+        assert!(retr_st.is_valid());
+        assert_eq!(retr_st.source(), test_sts[4].source());
+        assert_eq!(retr_st.is_modeled(), test_sts[4].is_modeled());
+        assert_eq!(retr_st.is_observed(), test_sts[4].is_observed());
+        assert_ne!(
+            retr_st.hours_between_initializations(),
+            test_sts[4].hours_between_initializations()
+        );
+        assert_eq!(retr_st.file_type(), test_sts[4].file_type());
+
+        assert_eq!(retr_st.source(), sref.source());
+        assert_eq!(retr_st.is_modeled(), sref.is_modeled());
+        assert_eq!(retr_st.is_observed(), sref.is_observed());
+        assert_eq!(
+            retr_st.hours_between_initializations(),
+            sref.hours_between_initializations()
+        );
+        assert_eq!(retr_st.file_type(), sref.file_type());
+
+        Ok(())
     }
 
     #[test]
@@ -1047,12 +1164,63 @@ mod unit {
 
     #[test]
     fn test_validate_sounding_type() -> Result<()> {
-        unimplemented!()
+        let TestArchive { tmp: _tmp, arch } =
+            create_test_archive().expect("Failed to create test archive.");
+
+        let mut test_sts = [
+            SoundingType::new("GFS", false, FileType::BUFKIT, 6),
+            SoundingType::new("NAM", false, FileType::BUFKIT, 6),
+            SoundingType::new("NamNest", false, FileType::BUFKIT, 6),
+            SoundingType::new("Incident", true, FileType::BUFR, None),
+            SoundingType::new("SREF", false, FileType::BUFKIT, 6),
+        ];
+
+        for st in test_sts.iter_mut() {
+            *st = arch
+                .validate_or_add_sounding_type(st.clone())
+                .expect("Error adding sounding type.");
+        }
+
+        for st in test_sts.iter() {
+            arch.validate_or_add_sounding_type(st.clone())?;
+        }
+
+        for st in test_sts.iter() {
+            let valid_st = arch.validate_sounding_type(st.clone())?;
+
+            assert!(valid_st.is_valid());
+            assert_eq!(valid_st.source(), st.source());
+        }
+
+        let bad_st = SoundingType::new("drill into ground", false, FileType::BUFR, 1);
+
+        assert!(arch.validate_sounding_type(bad_st).is_err());
+
+        Ok(())
     }
 
     #[test]
     fn test_validate_or_add_sounding_type() -> Result<()> {
-        unimplemented!()
+        let TestArchive { tmp: _tmp, arch } =
+            create_test_archive().expect("Failed to create test archive.");
+
+        let mut test_sts = [
+            SoundingType::new("GFS", false, FileType::BUFKIT, 6),
+            SoundingType::new("NAM", false, FileType::BUFKIT, 6),
+            SoundingType::new("NamNest", false, FileType::BUFKIT, 6),
+            SoundingType::new("Incident", true, FileType::BUFR, None),
+            SoundingType::new("SREF", false, FileType::BUFKIT, 6),
+        ];
+
+        for st in test_sts.iter_mut() {
+            *st = arch
+                .validate_or_add_sounding_type(st.clone())
+                .expect("Error adding sounding type.");
+
+            assert!(st.is_valid());
+        }
+
+        Ok(())
     }
 
     // ---------------------------------------------------------------------------------------------
