@@ -1227,24 +1227,101 @@ mod unit {
     // Query or modify location metadata
     // ---------------------------------------------------------------------------------------------
 
+    fn populate_test_locations(arch: &Archive) -> [Location; 5] {
+        let mut test_locs = [
+            Location::new(43.0, -110.0, 599, None),
+            Location::new(45.0, -112.0, 699, None),
+            Location::new(47.0, -114.0, 799, None),
+            Location::new(49.0, -116.0, 999, None),
+            Location::new(49.0, -116.0, 999, None), // Duplicate!
+        ];
+
+        for loc in test_locs.iter_mut() {
+            assert!(!loc.is_valid());
+
+            *loc = arch
+                .validate_or_add_location(loc.clone())
+                .expect("Error adding location.");
+
+            assert!(loc.is_valid());
+        }
+
+        test_locs
+    }
+
     #[test]
     fn test_all_locations() -> Result<()> {
-        unimplemented!()
+        let TestArchive { tmp: _tmp, arch } =
+            create_test_archive().expect("Failed to create test archive.");
+
+        let _ = populate_test_locations(&arch);
+
+        let locs = dbg!(arch.all_locations())?;
+        let locs: Vec<_> = locs.iter().map(|s| s.elevation()).collect();
+
+        assert_eq!(locs.len(), 4);
+        assert!(locs.contains(&599));
+        assert!(locs.contains(&699));
+        assert!(locs.contains(&799));
+        assert!(locs.contains(&999));
+        assert!(!locs.contains(&899));
+
+        Ok(())
     }
 
     #[test]
     fn test_location_info() -> Result<()> {
-        unimplemented!()
+        let TestArchive { tmp: _tmp, arch } =
+            create_test_archive().expect("Failed to create test archive.");
+
+        let test_locs = populate_test_locations(&arch);
+
+        for loc in test_locs.iter() {
+            let retr_loc = arch
+                .location_info(loc.latitude(), loc.longitude(), loc.elevation())
+                .unwrap()
+                .unwrap();
+
+            assert!(loc.is_valid());
+            assert!(retr_loc.is_valid());
+            assert_eq!(loc.latitude(), retr_loc.latitude());
+            assert_eq!(loc.longitude(), retr_loc.longitude());
+            assert_eq!(loc.elevation(), retr_loc.elevation());
+            assert_eq!(loc.tz_offset(), retr_loc.tz_offset());
+        }
+
+        Ok(())
     }
 
     #[test]
     fn test_retrieve_or_add_location() -> Result<()> {
-        unimplemented!()
+        let TestArchive { tmp: _tmp, arch } =
+            create_test_archive().expect("Failed to create test archive.");
+
+        let _ = populate_test_locations(&arch);
+
+        Ok(())
     }
 
     #[test]
     fn test_set_location_info() -> Result<()> {
-        unimplemented!()
+        let TestArchive { tmp: _tmp, arch } =
+            create_test_archive().expect("Failed to create test archive.");
+
+        let test_locs = populate_test_locations(&arch);
+
+        let loc = test_locs[0];
+        assert!(loc.is_valid());
+        let loc = loc.with_tz_offset(-3600 * 6);
+
+        arch.set_location_info(loc)?;
+
+        let retr_loc = arch.location_info(loc.latitude(), loc.longitude(), loc.elevation())?.unwrap();
+
+        assert_eq!(retr_loc.tz_offset(), loc.tz_offset());
+        assert_ne!(retr_loc.tz_offset(), test_locs[0].tz_offset());
+
+        Ok(())
     }
 
     #[test]

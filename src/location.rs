@@ -63,7 +63,7 @@ impl Location {
     }
 
     /// Add elevation in meters data to a location.
-    pub fn with_elevation<T>(self, elev: i32) -> Self {
+    pub fn with_elevation(self, elev: i32) -> Self {
         Location {
             elevation_m: elev,
             ..self
