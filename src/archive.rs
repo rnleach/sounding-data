@@ -1328,7 +1328,30 @@ mod unit {
 
     #[test]
     fn test_locations_for_site_and_type() -> Result<()> {
-        unimplemented!()
+        let TestArchive {
+            tmp: _tmp,
+            mut arch,
+        } = create_test_archive().expect("Failed to create test archive.");
+
+        fill_test_archive(&mut arch).expect("Error filling test archive.");
+
+        let site = arch.site_info("kmso")?.expect("No such site.");
+        let sounding_type = arch.sounding_types_for_site(&site)?.into_iter()
+            .filter(|st| st.source() == "GFS")
+            .nth(0)
+            .unwrap();
+
+        let locs: Vec<Location> = arch
+            .locations_for_site_and_type(&site, &sounding_type)?;
+
+        assert_eq!(locs.len(), 1);
+        let loc = locs.into_iter().nth(0).unwrap();
+        assert_eq!(loc.latitude(), 46.92);
+        assert_eq!(loc.longitude(), -114.08);
+        assert_eq!(loc.elevation(), 972);
+        assert!(loc.tz_offset().is_none());
+
+        Ok(())
     }
 
     #[test]
