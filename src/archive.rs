@@ -1336,13 +1336,14 @@ mod unit {
         fill_test_archive(&mut arch).expect("Error filling test archive.");
 
         let site = arch.site_info("kmso")?.expect("No such site.");
-        let sounding_type = arch.sounding_types_for_site(&site)?.into_iter()
+        let sounding_type = arch
+            .sounding_types_for_site(&site)?
+            .into_iter()
             .filter(|st| st.source() == "GFS")
             .nth(0)
             .unwrap();
 
-        let locs: Vec<Location> = arch
-            .locations_for_site_and_type(&site, &sounding_type)?;
+        let locs: Vec<Location> = arch.locations_for_site_and_type(&site, &sounding_type)?;
 
         assert_eq!(locs.len(), 1);
         let loc = locs.into_iter().nth(0).unwrap();
@@ -1440,7 +1441,26 @@ mod unit {
 
     #[test]
     fn test_most_recent_valid_time() -> Result<()> {
-        unimplemented!()
+        let TestArchive {
+            tmp: _tmp,
+            mut arch,
+        } = create_test_archive().expect("Failed to create test archive.");
+
+        fill_test_archive(&mut arch).expect("Error filling test archive.");
+
+        let site = dbg!(arch.site_info("kmso"))?.unwrap();
+        let sounding_type = dbg!(arch.sounding_type_info("GFS"))?.unwrap();
+        let most_recent = dbg!(arch.most_recent_valid_time(&site, &sounding_type))?;
+
+        let most_recent_should_be = NaiveDate::from_ymd(2017, 4, 1).and_hms(18, 0, 0);
+        assert_eq!(most_recent, most_recent_should_be);
+
+        let sounding_type = dbg!(arch.sounding_type_info("NAM"))?.unwrap();
+        let most_recent = dbg!(arch.most_recent_valid_time(&site, &sounding_type))?;
+
+        assert_eq!(most_recent, most_recent_should_be);
+
+        Ok(())
     }
 
     #[test]
