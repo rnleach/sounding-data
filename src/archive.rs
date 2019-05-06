@@ -1316,7 +1316,9 @@ mod unit {
 
         arch.set_location_info(loc)?;
 
-        let retr_loc = arch.location_info(loc.latitude(), loc.longitude(), loc.elevation())?.unwrap();
+        let retr_loc = arch
+            .location_info(loc.latitude(), loc.longitude(), loc.elevation())?
+            .unwrap();
 
         assert_eq!(retr_loc.tz_offset(), loc.tz_offset());
         assert_ne!(retr_loc.tz_offset(), test_locs[0].tz_offset());
@@ -1331,14 +1333,13 @@ mod unit {
 
     #[test]
     fn test_validate_location() -> Result<()> {
-       let TestArchive { tmp: _tmp, arch } =
+        let TestArchive { tmp: _tmp, arch } =
             create_test_archive().expect("Failed to create test archive.");
 
         let mut test_locations = populate_test_locations(&arch);
 
         for loc in test_locations.iter_mut() {
-            *loc = arch
-                .validate_location(*loc)?;
+            *loc = arch.validate_location(*loc)?;
 
             assert!(loc.is_valid());
         }
