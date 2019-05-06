@@ -1331,12 +1331,41 @@ mod unit {
 
     #[test]
     fn test_validate_location() -> Result<()> {
-        unimplemented!()
+       let TestArchive { tmp: _tmp, arch } =
+            create_test_archive().expect("Failed to create test archive.");
+
+        let mut test_locations = populate_test_locations(&arch);
+
+        for loc in test_locations.iter_mut() {
+            *loc = arch
+                .validate_location(*loc)?;
+
+            assert!(loc.is_valid());
+        }
+
+        assert_eq!(test_locations[3].id(), test_locations[4].id());
+
+        Ok(())
     }
 
     #[test]
     fn test_validate_or_add_location() -> Result<()> {
-        unimplemented!()
+        let TestArchive { tmp: _tmp, arch } =
+            create_test_archive().expect("Failed to create test archive.");
+
+        let mut test_locations = populate_test_locations(&arch);
+
+        for loc in test_locations.iter_mut() {
+            *loc = arch
+                .validate_or_add_location(*loc)
+                .expect("Error adding location.");
+
+            assert!(loc.is_valid());
+        }
+
+        assert_eq!(test_locations[3].id(), test_locations[4].id());
+
+        Ok(())
     }
 
     // ---------------------------------------------------------------------------------------------
