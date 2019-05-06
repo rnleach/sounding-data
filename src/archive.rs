@@ -1591,11 +1591,6 @@ mod unit {
     }
 
     #[test]
-    fn test_export() -> Result<()> {
-        unimplemented!()
-    }
-
-    #[test]
     fn test_get_most_recent_analysis() -> Result<()> {
         let TestArchive {
             tmp: _tmp,
