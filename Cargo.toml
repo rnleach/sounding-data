@@ -1,6 +1,6 @@
 [package]
 name = "sounding-data"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Ryan Leach <clumsycodemonkey@gmail.com>"]
 description = "A crate to manage an archive of sounding files."
 repository = "https://github.com/rnleach/sounding-data.git"
@@ -20,8 +20,8 @@ chrono = "0.4.2"
 flate2 = {version = "1.0", features = ["rust_backend"], default-features = false }
 fnv = "1"
 rusqlite = { version = "0.18", features = ["chrono"], default-features = false }
-sounding-analysis = {git = "https://github.com/rnleach/sounding-analysis.git", branch="dev"}
-sounding-bufkit = {git = "https://github.com/rnleach/sounding-bufkit.git", branch="dev"}
+sounding-analysis = "^0.11.0"
+sounding-bufkit = "^0.11.0"
 strum = "0.15"
 strum_macros = "0.15"
 
