@@ -19,6 +19,7 @@ use std::{
     path::{Path, PathBuf},
     str::from_utf8,
 };
+use strum::AsStaticRef;
 
 /// The archive.
 #[derive(Debug)]
@@ -577,38 +578,14 @@ impl Archive {
         let file_string = init_time.format("%Y-%m-%dT%H%MZ").to_string();
 
         format!(
-            "{}_{}_{}.gz",
+            "{}_{}_{}_{}.gz",
             file_string,
             sounding_type.source(),
+            sounding_type.file_type().as_static(),
             site.short_name(),
         )
         .into()
     }
-
-    // fn parse_compressed_file_name(fname: &str) -> Option<(NaiveDateTime, SoundingType, String)> {
-    //     // let tokens: Vec<&str> = fname.split(|c| c == '_' || c == '.').collect();
-
-    //     // if tokens.len() != 5 {
-    //     //     return None;
-    //     // }
-
-    //     // let year = tokens[0][0..4].parse::<i32>().ok()?;
-    //     // let month = tokens[0][4..6].parse::<u32>().ok()?;
-    //     // let day = tokens[0][6..8].parse::<u32>().ok()?;
-    //     // let hour = tokens[0][8..10].parse::<u32>().ok()?;
-    //     // let init_time = NaiveDate::from_ymd(year, month, day).and_hms(hour, 0, 0);
-
-    //     // let model = Model::from_str(tokens[1]).ok()?;
-
-    //     // let site = tokens[2].to_owned();
-
-    //     // if tokens[3] != "buf" || tokens[4] != "gz" {
-    //     //     return None;
-    //     // }
-
-    //     // Some((init_time, model, site))
-    //     unimplemented!()
-    // }
 
     /// Remove a file from the archive.
     pub fn remove(
