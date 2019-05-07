@@ -1,5 +1,8 @@
-use crate::{errors::BufkitDataErr, site::Site};
-use rusqlite::{types::ToSql, Connection, OptionalExtension, Row};
+use crate::{
+    errors::{BufkitDataErr, Result},
+    site::Site,
+};
+use rusqlite::{types::ToSql, Connection, Row, NO_PARAMS};
 use std::str::FromStr;
 use strum::AsStaticRef;
 use strum_macros::{AsStaticStr, EnumString};
@@ -65,7 +68,7 @@ impl SoundingType {
 
     /// `true` if this type has been verified to be in the archive index.
     #[inline]
-    pub fn is_known(&self) -> bool {
+    pub fn is_valid(&self) -> bool {
         self.id > -0
     }
 
@@ -98,8 +101,8 @@ impl SoundingType {
 pub(crate) fn retrieve_sounding_type(
     db: &Connection,
     sounding_type_as_str: &str,
-) -> Result<SoundingType, BufkitDataErr> {
-    db.query_row(
+) -> Result<Option<SoundingType>> {
+    match db.query_row(
         "
             SELECT id, type, file_type, interval, observed
             FROM types
@@ -107,88 +110,86 @@ pub(crate) fn retrieve_sounding_type(
         ",
         &[sounding_type_as_str],
         parse_row_to_sounding_type,
-    )?
+    ) {
+        Ok(sounding_type) => Ok(Some(sounding_type)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(err) => Err(BufkitDataErr::from(err)),
+    }
 }
 
-/// Insert or update the sounding type information in the database.
+/// Update the sounding type information in the index.
 #[inline]
-pub(crate) fn insert_or_update_sounding_type(
+pub(crate) fn update_sounding_type(
     db: &Connection,
     sounding_type: SoundingType,
-) -> Result<SoundingType, BufkitDataErr> {
-    if let Some(row_id) = db
-        .query_row(
-            "SELECT rowid FROM types where type = ?1",
-            &[sounding_type.source()],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?
-    {
-        // row already exists - so update
-        db.execute(
-            "
+) -> Result<SoundingType> {
+    db.execute(
+        "
                 UPDATE types
                 SET (interval, observed)
                 = (?2, ?3)
                 WHERE type = ?1
             ",
-            &[
-                &sounding_type.source,
-                &sounding_type.hours_between as &ToSql,
-                &sounding_type.observed,
-            ],
-        )?;
+        &[
+            &sounding_type.source,
+            &sounding_type.hours_between as &ToSql,
+            &sounding_type.observed,
+        ],
+    )?;
 
-        Ok(SoundingType {
-            id: row_id,
-            ..sounding_type
-        })
-    } else {
-        // insert
-        db.execute(
-            "
-                INSERT INTO types(type, file_type, interval, observed) 
-                VALUES(?1, ?2, ?3, ?4)
-            ",
-            &[
-                &sounding_type.source,
-                &sounding_type.file_type.as_static() as &ToSql,
-                &sounding_type.hours_between as &ToSql,
-                &sounding_type.observed,
-            ],
-        )?;
-
-        let row_id = db.last_insert_rowid();
-        Ok(SoundingType {
-            id: row_id,
-            ..sounding_type
-        })
-    }
+    retrieve_sounding_type(db, &sounding_type.source).map(|opt| opt.unwrap())
 }
 
-// /// Get a list of all the sounding types stored in the database
-// #[inline]
-// pub(crate) fn all_sounding_types(db: &Connection) -> Result<Vec<SoundingType>, BufkitDataErr> {
-//     let mut stmt = db.prepare(
-//         "
-//             SELECT id, type, file_type, interval, observed
-//             FROM types;
-//         ",
-//     )?;
+/// Insert the `SoundingType` information in the index.
+#[inline]
+pub(crate) fn insert_sounding_type(
+    db: &Connection,
+    sounding_type: SoundingType,
+) -> Result<SoundingType> {
+    db.execute(
+        "
+            INSERT INTO types(type, file_type, interval, observed) 
+            VALUES(?1, ?2, ?3, ?4)
+        ",
+        &[
+            &sounding_type.source,
+            &sounding_type.file_type.as_static() as &ToSql,
+            &sounding_type.hours_between as &ToSql,
+            &sounding_type.observed,
+        ],
+    )?;
 
-//     let vals: Result<Vec<SoundingType>, BufkitDataErr> = stmt
-//         .query_and_then(NO_PARAMS, parse_row_to_sounding_type)?
-//         .collect();
+    let row_id = db.last_insert_rowid();
+    Ok(SoundingType {
+        id: row_id,
+        ..sounding_type
+    })
+}
 
-//     vals
-// }
+/// Get a list of sites from the index
+#[inline]
+pub(crate) fn all_sounding_types(db: &Connection) -> Result<Vec<SoundingType>> {
+    let mut stmt = db.prepare(
+        "
+             SELECT id, type, file_type, interval, observed
+             FROM types;
+        ",
+    )?;
+
+    let vals: Result<Vec<SoundingType>> = stmt
+        .query_and_then(NO_PARAMS, parse_row_to_sounding_type)?
+        .map(|res| res.map_err(|err| BufkitDataErr::from(err)))
+        .collect();
+
+    vals
+}
 
 /// Get a list of all the sounding types stored in the database for a particular site
 #[inline]
 pub(crate) fn all_sounding_types_for_site(
     db: &Connection,
     site: &Site,
-) -> Result<Vec<SoundingType>, BufkitDataErr> {
+) -> Result<Vec<SoundingType>> {
     let mut stmt = db.prepare(
         "
             SELECT id, type, file_type, interval, observed 
@@ -198,19 +199,21 @@ pub(crate) fn all_sounding_types_for_site(
         ",
     )?;
 
-    let vals: Result<Vec<SoundingType>, BufkitDataErr> = stmt
+    let vals: Result<Vec<SoundingType>> = stmt
         .query_and_then(&[&site.id()], parse_row_to_sounding_type)?
+        .map(|res| res.map_err(|err| BufkitDataErr::from(err)))
         .collect();
 
     vals
 }
 
-fn parse_row_to_sounding_type(row: &Row) -> Result<SoundingType, BufkitDataErr> {
-    let id: i64 = row.get_checked(0)?;
-    let source = row.get_checked(1)?;
-    let file_type: FileType = FileType::from_str(&row.get_checked::<_, String>(2)?)?;
-    let hours_between = row.get_checked(3)?;
-    let observed = row.get_checked(4)?;
+fn parse_row_to_sounding_type(row: &Row) -> std::result::Result<SoundingType, rusqlite::Error> {
+    let id: i64 = row.get(0)?;
+    let source = row.get(1)?;
+    let file_type: FileType =
+        FileType::from_str(&row.get::<_, String>(2)?).unwrap_or(FileType::UNKNOWN);
+    let hours_between = row.get(3)?;
+    let observed = row.get(4)?;
 
     Ok(SoundingType {
         id,
@@ -228,6 +231,8 @@ pub enum FileType {
     BUFKIT,
     /// A bufr encoded file.
     BUFR,
+    /// An unknown file type
+    UNKNOWN,
 }
 
 /*--------------------------------------------------------------------------------------------------
@@ -237,11 +242,10 @@ pub enum FileType {
 mod unit {
     use super::*;
     use rusqlite::{Connection, OpenFlags};
-    use std::error::Error;
     use tempdir::TempDir;
 
     #[test]
-    fn test_insert_retrieve_sounding_type() -> Result<(), Box<Error>> {
+    fn test_insert_retrieve_sounding_type() -> Result<()> {
         let tmp = TempDir::new("bufkit-data-test-archive")?;
         let db_file = tmp.as_ref().join("test_index.sqlite");
         let db_conn = Connection::open_with_flags(
@@ -251,11 +255,11 @@ mod unit {
 
         db_conn.execute_batch(include_str!("create_index.sql"))?;
 
-        insert_or_update_sounding_type(
+        insert_sounding_type(
             &db_conn,
             SoundingType::new_model("GFS3", FileType::BUFKIT, 6),
         )?;
-        let snd_tp = dbg!(retrieve_sounding_type(&db_conn, "GFS3"))?;
+        let snd_tp = retrieve_sounding_type(&db_conn, "GFS3")?.expect("No such sounding type.");
 
         assert_eq!(snd_tp.source(), "GFS3");
 

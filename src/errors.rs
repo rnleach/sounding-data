@@ -1,7 +1,9 @@
 //! Module for errors.
+use crate::{location::Location, site::Site, sounding_type::SoundingType};
 use sounding_analysis::AnalysisError;
-use std::error::Error;
-use std::fmt::Display;
+use std::{error::Error, fmt::Display};
+
+pub type Result<T> = std::result::Result<T, BufkitDataErr>;
 
 /// FIXME: Rename this error.
 /// Error from the archive interface.
@@ -34,14 +36,20 @@ pub enum BufkitDataErr {
     //
     // My own errors from this crate
     //
-    /// Invalid model name
-    InvalidModelName(String),
     /// Not enough data to complete the task.
     NotEnoughData,
+    /// No such site in the database.
+    InvalidSite(Site),
+    /// No such sounding type in the index.
+    InvalidSoundingType(SoundingType),
+    /// No such location in the index.
+    InvalidLocation(Location),
+    /// Unknown file type
+    UnknownFileType,
 }
 
 impl Display for BufkitDataErr {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::result::Result<(), std::fmt::Error> {
         use crate::BufkitDataErr::*;
 
         match self {
@@ -54,13 +62,42 @@ impl Display for BufkitDataErr {
             StrumError(err) => write!(f, "error forwarded from strum crate: {}", err),
             GeneralError(msg) => write!(f, "general error forwarded: {}", msg),
 
-            InvalidModelName(mdl_nm) => write!(f, "invalid model name: {}", mdl_nm),
             NotEnoughData => write!(f, "not enough data to complete task"),
+            InvalidSite(site) => write!(f, "no such site in the index: {}", site.short_name()),
+            InvalidSoundingType(st) => {
+                write!(f, "no such sounding type in the index: {}", st.source())
+            }
+            InvalidLocation(loc) => write!(
+                f,
+                "no such location in the index: lat: {}, lon: {}, elev: {}",
+                loc.latitude(),
+                loc.longitude(),
+                loc.elevation()
+            ),
+            UnknownFileType => write!(f, "unkown file type for"),
         }
     }
 }
 
-impl Error for BufkitDataErr {}
+impl Error for BufkitDataErr {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        use crate::BufkitDataErr::*;
+
+        match self {
+            SoundingAnalysis(err) => Some(err),
+            Io(err) => Some(err),
+            Utf8(err) => Some(err),
+            Database(err) => Some(err),
+            StrumError(err) => Some(err),
+            GeneralError(_) => None,
+            NotEnoughData => None,
+            InvalidSite(_) => None,
+            InvalidSoundingType(_) => None,
+            InvalidLocation(_) => None,
+            UnknownFileType => None,
+        }
+    }
+}
 
 impl From<AnalysisError> for BufkitDataErr {
     fn from(err: AnalysisError) -> BufkitDataErr {
