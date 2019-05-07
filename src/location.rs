@@ -123,6 +123,7 @@ pub(crate) fn all_locations(db: &Connection) -> Result<Vec<Location>> {
 
     let vals: Result<Vec<Location>> = stmt
         .query_and_then(NO_PARAMS, parse_row_to_location)?
+        .map(|res| res.map_err(|err| BufkitDataErr::from(err)))
         .collect();
 
     vals
@@ -149,8 +150,7 @@ pub(crate) fn retrieve_location(
         ],
         parse_row_to_location,
     ) {
-        Ok(Ok(location)) => Ok(Some(location)),
-        Ok(Err(err)) => Err(err),
+        Ok(location) => Ok(Some(location)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(err) => Err(BufkitDataErr::from(err)),
     }
@@ -178,8 +178,7 @@ pub(crate) fn retrieve_or_add_location(
         ],
         parse_row_to_location,
     ) {
-        Ok(Ok(location)) => Ok(location),
-        Ok(Err(err)) => Err(err),
+        Ok(location) => Ok(location),
         Err(rusqlite::Error::QueryReturnedNoRows) => {
             // Query worked, but found nothing
             insert_location_(db, latitude, longitude, elevation_m, None)
@@ -273,17 +272,18 @@ pub(crate) fn all_locations_for_site_and_type(
 
     let vals: Result<Vec<Location>> = stmt
         .query_and_then(&[site.id(), sounding_type.id()], parse_row_to_location)?
+        .map(|res| res.map_err(|err| BufkitDataErr::from(err)))
         .collect();
 
     vals
 }
 
-fn parse_row_to_location(row: &Row) -> Result<Location> {
-    let id: i64 = row.get_checked(0)?;
-    let latitude: f64 = row.get_checked::<_, i64>(1)? as f64 / 1_000_000.0;
-    let longitude: f64 = row.get_checked::<_, i64>(2)? as f64 / 1_000_000.0;
-    let elevation_m: i32 = row.get_checked(3)?;
-    let tz_offset: Option<i32> = row.get_checked(4)?;
+fn parse_row_to_location(row: &Row) -> std::result::Result<Location, rusqlite::Error> {
+    let id: i64 = row.get(0)?;
+    let latitude: f64 = row.get::<_, i64>(1)? as f64 / 1_000_000.0;
+    let longitude: f64 = row.get::<_, i64>(2)? as f64 / 1_000_000.0;
+    let elevation_m: i32 = row.get(3)?;
+    let tz_offset: Option<i32> = row.get(4)?;
 
     Ok(Location {
         id,

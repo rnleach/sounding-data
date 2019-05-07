@@ -111,8 +111,7 @@ pub(crate) fn retrieve_sounding_type(
         &[sounding_type_as_str],
         parse_row_to_sounding_type,
     ) {
-        Ok(Ok(sounding_type)) => Ok(Some(sounding_type)),
-        Ok(Err(err)) => Err(err),
+        Ok(sounding_type) => Ok(Some(sounding_type)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(err) => Err(BufkitDataErr::from(err)),
     }
@@ -179,6 +178,7 @@ pub(crate) fn all_sounding_types(db: &Connection) -> Result<Vec<SoundingType>> {
 
     let vals: Result<Vec<SoundingType>> = stmt
         .query_and_then(NO_PARAMS, parse_row_to_sounding_type)?
+        .map(|res| res.map_err(|err| BufkitDataErr::from(err)))
         .collect();
 
     vals
@@ -201,17 +201,19 @@ pub(crate) fn all_sounding_types_for_site(
 
     let vals: Result<Vec<SoundingType>> = stmt
         .query_and_then(&[&site.id()], parse_row_to_sounding_type)?
+        .map(|res| res.map_err(|err| BufkitDataErr::from(err)))
         .collect();
 
     vals
 }
 
-fn parse_row_to_sounding_type(row: &Row) -> Result<SoundingType> {
-    let id: i64 = row.get_checked(0)?;
-    let source = row.get_checked(1)?;
-    let file_type: FileType = FileType::from_str(&row.get_checked::<_, String>(2)?)?;
-    let hours_between = row.get_checked(3)?;
-    let observed = row.get_checked(4)?;
+fn parse_row_to_sounding_type(row: &Row) -> std::result::Result<SoundingType, rusqlite::Error> {
+    let id: i64 = row.get(0)?;
+    let source = row.get(1)?;
+    let file_type: FileType =
+        FileType::from_str(&row.get::<_, String>(2)?).unwrap_or(FileType::UNKNOWN);
+    let hours_between = row.get(3)?;
+    let observed = row.get(4)?;
 
     Ok(SoundingType {
         id,
@@ -229,6 +231,8 @@ pub enum FileType {
     BUFKIT,
     /// A bufr encoded file.
     BUFR,
+    /// An unknown file type
+    UNKNOWN,
 }
 
 /*--------------------------------------------------------------------------------------------------

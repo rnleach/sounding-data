@@ -9,7 +9,7 @@ use crate::{
 };
 use chrono::NaiveDateTime;
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
-use rusqlite::{types::ToSql, Connection, OpenFlags, NO_PARAMS};
+use rusqlite::{types::ToSql, Connection, OpenFlags, Row, NO_PARAMS};
 use sounding_analysis::Analysis;
 use sounding_bufkit::BufkitData;
 use std::{
@@ -92,7 +92,9 @@ impl Archive {
         let mut all_files_stmt = self.db_conn.prepare("SELECT file_name FROM files")?;
 
         let index_vals: Result<HashSet<String>> = all_files_stmt
-            .query_map(NO_PARAMS, |row| -> String { row.get(0) })?
+            .query_map(NO_PARAMS, |row: &Row| -> std::result::Result<String, _> {
+                row.get(0)
+            })?
             .map(|res| res.map_err(BufkitDataErr::Database))
             .map(|res| res.map(String::from))
             .collect();
@@ -354,7 +356,7 @@ impl Archive {
     }
 
     /// Retrieve the model initialization time of the most recent model in the archive.
-    pub fn most_recent_valid_time(
+    pub fn most_recent_init_time(
         &self,
         site: &Site,
         sounding_type: &SoundingType,
@@ -370,8 +372,8 @@ impl Archive {
                 LIMIT 1
             ",
             &[&site.id(), &sounding_type.id()],
-            |row| row.get_checked(0),
-        )??;
+            |row| row.get(0),
+        )?;
 
         Ok(init_time)
     }
@@ -389,8 +391,8 @@ impl Archive {
         let num_records: i32 = self.db_conn.query_row(
             "SELECT COUNT(*) FROM files WHERE site_id = ?1 AND type_id = ?2 AND init_time = ?3",
             &[&site.id(), &sounding_type.id(), init_time as &ToSql],
-            |row| row.get_checked(0),
-        )??;
+            |row| row.get(0),
+        )?;
 
         Ok(num_records == 1)
     }
@@ -399,9 +401,7 @@ impl Archive {
     pub fn count(&self) -> Result<i64> {
         let num_records: i64 =
             self.db_conn
-                .query_row("SELECT COUNT(*) FROM files", NO_PARAMS, |row| {
-                    row.get_checked(0)
-                })??;
+                .query_row("SELECT COUNT(*) FROM files", NO_PARAMS, |row| row.get(0))?;
 
         Ok(num_records)
     }
@@ -417,6 +417,7 @@ impl Archive {
         sounding_type: &SoundingType,
         location: &Location,
         init_time: &NaiveDateTime,
+        end_time: &NaiveDateTime,
         file_name: &str,
     ) -> Result<()> {
         debug_assert!(site.is_valid());
@@ -432,14 +433,16 @@ impl Archive {
 
         self.db_conn.execute(
             "
-                INSERT OR REPLACE INTO files (type_id, site_id, location_id, init_time, file_name)
-                VALUES (?1, ?2, ?3, ?4, ?5)
+                INSERT OR REPLACE INTO files 
+                    (type_id, site_id, location_id, init_time, end_time, file_name)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
             ",
             &[
                 &sounding_type.id(),
                 &site.id(),
                 &location.id(),
                 &init_time as &ToSql,
+                &end_time as &ToSql,
                 &fname,
             ],
         )?;
@@ -462,8 +465,8 @@ impl Archive {
         let file_name: String = self.db_conn.query_row(
             "SELECT file_name FROM files WHERE site_id = ?1 AND type_id = ?2 AND init_time = ?3",
             &[&site.id(), &sounding_type.id(), init_time as &ToSql],
-            |row| row.get_checked(0),
-        )??;
+            |row| row.get(0),
+        )?;
 
         Ok(file_name)
     }
@@ -486,10 +489,11 @@ impl Archive {
                 Ok(bufkit_anals)
             }
             FileType::BUFR => unimplemented!(),
+            FileType::UNKNOWN => Err(BufkitDataErr::UnknownFileType),
         }
     }
 
-    /// Retrieve a file from the archive.
+    /// Retrieve an analysis from the archive.
     pub fn retrieve(
         &self,
         site: &Site,
@@ -499,6 +503,47 @@ impl Archive {
         let file_name = self.get_file_name_for(site, sounding_type, init_time)?;
         let data = self.load_data(&file_name)?;
         Self::decode_data(&data, &file_name, sounding_type.file_type())
+    }
+
+    /// Retrieve all analyses for a `Site` and `SoundingType` that have any data valid during
+    /// the specified period.
+    pub fn retrieve_all(
+        &self,
+        site: &Site,
+        sounding_type: &SoundingType,
+        start_time: &NaiveDateTime,
+        end_time: &NaiveDateTime,
+    ) -> Result<Vec<Vec<Analysis>>> {
+        // Get a list of file names
+        let mut stmt = self.db_conn.prepare(
+            "
+                SELECT file_name 
+                FROM files
+                WHERE site_id = ?1 AND type_id = ?2 AND end_time >= ?3 AND init_time <= ?4
+                ORDER BY init_time ASC
+            ",
+        )?;
+
+        let vals: Result<Vec<Vec<Analysis>>> = stmt
+            .query_map(
+                &[
+                    &site.id(),
+                    &sounding_type.id(),
+                    &start_time as &ToSql,
+                    &end_time,
+                ],
+                |row: &Row| -> std::result::Result<String, rusqlite::Error> { row.get(0) },
+            )?
+            .map(|res| res.map_err(BufkitDataErr::from))
+            .map(|res| res.and_then(|fname| self.load_data(&fname).map(|data| (fname, data))))
+            .map(|res| {
+                res.and_then(|(fname, data)| {
+                    Self::decode_data(&data, &fname, sounding_type.file_type())
+                })
+            })
+            .collect();
+
+        vals
     }
 
     /// Retrieve and uncompress a file.
@@ -519,7 +564,7 @@ impl Archive {
         site: &Site,
         sounding_type: &SoundingType,
     ) -> Result<Vec<Analysis>> {
-        let init_time = self.most_recent_valid_time(site, sounding_type)?;
+        let init_time = self.most_recent_init_time(site, sounding_type)?;
         self.retrieve(site, sounding_type, &init_time)
     }
 
@@ -575,8 +620,8 @@ impl Archive {
         let file_name: String = self.db_conn.query_row(
             "SELECT file_name FROM files WHERE site_id = ?1 AND type_id = ?2 AND init_time = ?3",
             &[&site.id(), &sounding_type.id(), init_time as &ToSql],
-            |row| row.get_checked(0),
-        )??;
+            |row| row.get(0),
+        )?;
 
         remove_file(self.file_dir.join(file_name)).map_err(BufkitDataErr::Io)?;
 
@@ -617,7 +662,16 @@ mod unit {
     }
 
     // Function to fetch a list of test files.
-    fn get_test_data() -> Result<Vec<(Site, SoundingType, NaiveDateTime, Location, String)>> {
+    fn get_test_data() -> Result<
+        Vec<(
+            Site,
+            SoundingType,
+            NaiveDateTime,
+            NaiveDateTime,
+            Location,
+            String,
+        )>,
+    > {
         let path = PathBuf::new().join("example_data");
 
         let files = read_dir(path)?
@@ -639,9 +693,10 @@ mod unit {
             // FIXME: handle multiple file types, like BUFR and whatever else types we want to work
             //
             let bufkit_file = BufkitFile::load(&path)?;
-            let anal = bufkit_file
-                .data()?
-                .into_iter()
+            let bufkit_data = bufkit_file.data()?;
+            let mut bufkit_iter = bufkit_data.into_iter();
+            let anal = bufkit_iter
+                .by_ref()
                 .nth(0)
                 .ok_or(BufkitDataErr::NotEnoughData)?;
             let snd = anal.sounding();
@@ -663,10 +718,15 @@ mod unit {
             let elev_m = snd.station_info().elevation().unwrap().unpack();
             let loc = Location::new(lat, lon, elev_m as i32, None);
 
+            let anal = bufkit_iter.last().ok_or(BufkitDataErr::NotEnoughData)?;
+            let snd = anal.sounding();
+            let end_time = snd.valid_time().expect("NO VALID TIME FOR THE LAST ONE!?");
+
             to_return.push((
                 site.to_owned(),
                 model,
                 init_time,
+                end_time,
                 loc,
                 path.to_string_lossy().to_string(),
             ))
@@ -679,11 +739,18 @@ mod unit {
     fn fill_test_archive(arch: &mut Archive) -> Result<()> {
         let test_data = get_test_data().expect("Error loading test data.");
 
-        for (site, sounding_type, init_time, loc, file_name) in test_data {
+        for (site, sounding_type, init_time, end_time, loc, file_name) in test_data {
             let site = arch.validate_or_add_site(site)?;
             let sounding_type = arch.validate_or_add_sounding_type(sounding_type)?;
             let loc = arch.validate_or_add_location(loc)?;
-            arch.add_file(&site, &sounding_type.clone(), &loc, &init_time, &file_name)?;
+            arch.add_file(
+                &site,
+                &sounding_type.clone(),
+                &loc,
+                &init_time,
+                &end_time,
+                &file_name,
+            )?;
         }
 
         Ok(())
@@ -1440,7 +1507,7 @@ mod unit {
     }
 
     #[test]
-    fn test_most_recent_valid_time() -> Result<()> {
+    fn test_most_recent_init_time() -> Result<()> {
         let TestArchive {
             tmp: _tmp,
             mut arch,
@@ -1450,13 +1517,13 @@ mod unit {
 
         let site = dbg!(arch.site_info("kmso"))?.unwrap();
         let sounding_type = dbg!(arch.sounding_type_info("GFS"))?.unwrap();
-        let most_recent = dbg!(arch.most_recent_valid_time(&site, &sounding_type))?;
+        let most_recent = dbg!(arch.most_recent_init_time(&site, &sounding_type))?;
 
         let most_recent_should_be = NaiveDate::from_ymd(2017, 4, 1).and_hms(18, 0, 0);
         assert_eq!(most_recent, most_recent_should_be);
 
         let sounding_type = dbg!(arch.sounding_type_info("NAM"))?.unwrap();
-        let most_recent = dbg!(arch.most_recent_valid_time(&site, &sounding_type))?;
+        let most_recent = dbg!(arch.most_recent_init_time(&site, &sounding_type))?;
 
         assert_eq!(most_recent, most_recent_should_be);
 
@@ -1561,13 +1628,20 @@ mod unit {
 
         let test_data = get_test_data().expect("Error loading test data.");
 
-        for (site, sounding_type, init_time, loc, file_name) in test_data {
+        for (site, sounding_type, init_time, end_time, loc, file_name) in test_data {
             let site = arch.validate_or_add_site(site)?;
             let sounding_type = arch.validate_or_add_sounding_type(sounding_type)?;
             let loc = arch.validate_or_add_location(loc)?;
 
-            arch.add_file(&site, &sounding_type.clone(), &loc, &init_time, &file_name)
-                .expect("Failure to add.");
+            arch.add_file(
+                &site,
+                &sounding_type.clone(),
+                &loc,
+                &init_time,
+                &end_time,
+                &file_name,
+            )
+            .expect("Failure to add.");
 
             let site = arch
                 .site_info(site.short_name())
@@ -1605,13 +1679,37 @@ mod unit {
             .expect("Sounding type not in index");
 
         let init_time = arch
-            .most_recent_valid_time(&kmso, &snd_type)
+            .most_recent_init_time(&kmso, &snd_type)
             .expect("Error getting valid time.");
 
         assert_eq!(init_time, NaiveDate::from_ymd(2017, 4, 1).and_hms(18, 0, 0));
 
         arch.most_recent_analysis(&kmso, &snd_type)
             .expect("Failed to retrieve sounding.");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_retrieve_all() -> Result<()> {
+        let TestArchive {
+            tmp: _tmp,
+            mut arch,
+        } = create_test_archive().expect("Failed to create test archive.");
+
+        fill_test_archive(&mut arch).expect("Error filling test archive.");
+
+        let kmso = arch.site_info("kmso")?.expect("Site not in index.");
+        let snd_type = arch
+            .sounding_type_info("GFS")?
+            .expect("Sounding type not in index");
+
+        let start_time = NaiveDate::from_ymd(2017, 3, 1).and_hms(1, 0, 0);
+        let end_time = NaiveDate::from_ymd(2017, 4, 1).and_hms(12, 0, 0);
+
+        let all = arch.retrieve_all(&kmso, &snd_type, &start_time, &end_time)?;
+
+        assert_eq!(all.len(), 3);
 
         Ok(())
     }

@@ -138,8 +138,7 @@ pub(crate) fn retrieve_site(db: &Connection, short_name: &str) -> Result<Option<
         &[&short_name],
         parse_row_to_site,
     ) {
-        Ok(Ok(site)) => Ok(Some(site)),
-        Ok(Err(err)) => Err(err),
+        Ok(site) => Ok(Some(site)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(err) => Err(BufkitDataErr::from(err)),
     }
@@ -198,21 +197,24 @@ pub(crate) fn all_sites(db: &Connection) -> Result<Vec<Site>> {
         ",
     )?;
 
-    let vals: Result<Vec<Site>> = stmt.query_and_then(NO_PARAMS, parse_row_to_site)?.collect();
+    let vals: Result<Vec<Site>> = stmt
+        .query_and_then(NO_PARAMS, parse_row_to_site)?
+        .map(|res| res.map_err(|err| BufkitDataErr::from(err)))
+        .collect();
 
     vals
 }
 
-fn parse_row_to_site(row: &Row) -> Result<Site> {
-    let short_name: String = row.get_checked(1)?;
-    let long_name: Option<String> = row.get_checked(2)?;
-    let notes: Option<String> = row.get_checked(4)?;
-    let is_mobile = row.get_checked(5)?;
+fn parse_row_to_site(row: &Row) -> std::result::Result<Site, rusqlite::Error> {
+    let short_name: String = row.get(1)?;
+    let long_name: Option<String> = row.get(2)?;
+    let notes: Option<String> = row.get(4)?;
+    let is_mobile = row.get(5)?;
     let state: Option<StateProv> = row
-        .get_checked::<_, String>(3)
+        .get::<_, String>(3)
         .ok()
         .and_then(|a_string| StateProv::from_str(&a_string).ok());
-    let id: i64 = row.get_checked(0)?;
+    let id: i64 = row.get(0)?;
 
     Ok(Site {
         short_name,

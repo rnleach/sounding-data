@@ -30,6 +30,7 @@ CREATE TABLE files (
     site_id     INTEGER     NOT NULL,
     location_id INTEGER     NOT NULL,
     init_time   TEXT        NOT NULL,
+    end_time    TEXT        NOT NULL,
     file_name   TEXT UNIQUE NOT NULL,
     FOREIGN KEY (type_id)     REFERENCES types(id),
     FOREIGN KEY (site_id)     REFERENCES sites(id),

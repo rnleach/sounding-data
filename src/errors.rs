@@ -44,6 +44,8 @@ pub enum BufkitDataErr {
     InvalidSoundingType(SoundingType),
     /// No such location in the index.
     InvalidLocation(Location),
+    /// Unknown file type
+    UnknownFileType,
 }
 
 impl Display for BufkitDataErr {
@@ -72,6 +74,7 @@ impl Display for BufkitDataErr {
                 loc.longitude(),
                 loc.elevation()
             ),
+            UnknownFileType => write!(f, "unkown file type for"),
         }
     }
 }
@@ -91,6 +94,7 @@ impl Error for BufkitDataErr {
             InvalidSite(_) => None,
             InvalidSoundingType(_) => None,
             InvalidLocation(_) => None,
+            UnknownFileType => None,
         }
     }
 }

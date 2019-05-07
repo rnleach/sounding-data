@@ -14,7 +14,7 @@ pub struct Inventory {
     sounding_types: FnvHashSet<SoundingType>,
     /// The earliest and latest init_time in the archive.
     range: FnvHashMap<SoundingType, (NaiveDateTime, NaiveDateTime)>,
-    /// A list of start and end times for missing model runs.
+    /// A list of start and end init times for missing model runs.
     missing: FnvHashMap<SoundingType, Vec<(NaiveDateTime, NaiveDateTime)>>,
     /// Locations
     locations: FnvHashMap<SoundingType, Vec<Location>>,
@@ -85,7 +85,7 @@ pub fn inventory(db: &Connection, site: Site) -> Result<Inventory> {
 
         let rng: (NaiveDateTime, NaiveDateTime) = stmt
             .query_row(&[site.id(), sounding_type.id()], |row| {
-                (row.get(0), row.get(1))
+                Ok((row.get(0)?, row.get(1)?))
             })?;
         range.insert(sounding_type.clone(), rng);
 
